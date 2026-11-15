@@ -1,0 +1,12 @@
+{
+  "name": "boring-security",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Evidence-first security audit skill and slash commands for coding agents. Zero runtime dependencies.",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test skills/boring-security/scripts/test/validators.test.cjs skills/boring-security/scripts/test/detector.test.cjs skills/boring-security/scripts/test/score.test.cjs skills/boring-security/scripts/test/run-state.test.cjs",
+    "detect": "node skills/boring-security/scripts/detect.cjs"
+  }
+}

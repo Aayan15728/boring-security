@@ -1,0 +1,5 @@
+{
+  "detector": {
+    "exclude_paths": ["skills/boring-security/scripts/detect-rules.cjs"]
+  }
+}

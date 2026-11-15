@@ -1,0 +1,17 @@
+{
+  "name": "boring-security",
+  "owner": {
+    "name": "boring-security contributors"
+  },
+  "metadata": {
+    "description": "Evidence-first security audit skill and slash commands for Claude Code (concepts adapted from cloudflare/security-audit-skill, MIT)."
+  },
+  "plugins": [
+    {
+      "name": "boring-security",
+      "source": "./",
+      "skills": ["./skills/boring-security"],
+      "description": "Evidence-first security audits with /deep-audit, /full-audit, /quick-audit, /sec-review, /mobile-audit and more."
+    }
+  ]
+}
