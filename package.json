@@ -1,7 +1,7 @@
 {
-  "name": "boring-security",
+  "name": "boring-security-skill",
   "version": "0.4.0",
-  "description": "Evidence-first security audits for Claude Code: agents hunt, a skeptic disproves, scripts verify every quote. Install with npx boring-security.",
+  "description": "Evidence-first security audits for Claude Code: agents hunt, a skeptic disproves, scripts verify every quote. Install with npx boring-security-skill.",
   "keywords": [
     "claude-code",
     "claude",
@@ -26,6 +26,7 @@
   },
   "license": "MIT",
   "bin": {
+    "boring-security-skill": "install.cjs",
     "boring-security": "install.cjs"
   },
   "files": [

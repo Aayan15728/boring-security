@@ -327,7 +327,7 @@ function installPlugin(o, bin, version) {
   out('Next: restart Claude Code or start a new session (or run /reload-plugins), then try /quick-audit');
   out('or ask: "security audit this repo".');
   if (FROM_CHECKOUT) out('Update: git pull in this folder, then node install.cjs again. Remove: node install.cjs --uninstall');
-  else out('Update: npx boring-security@latest. Remove: npx boring-security --uninstall');
+  else out('Update: npx boring-security-skill@latest. Remove: npx boring-security-skill --uninstall');
 }
 
 // ---------------------------------------------------------------- copy route
