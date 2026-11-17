@@ -1,9 +1,48 @@
 {
   "name": "boring-security",
   "version": "0.4.0",
-  "private": true,
-  "description": "Evidence-first security audit skill and slash commands for coding agents. Zero runtime dependencies.",
+  "description": "Evidence-first security audits for Claude Code: agents hunt, a skeptic disproves, scripts verify every quote. Install with npx boring-security.",
+  "keywords": [
+    "claude-code",
+    "claude",
+    "skill",
+    "plugin",
+    "security",
+    "audit",
+    "appsec",
+    "vibe-coding",
+    "supabase",
+    "nextjs",
+    "pentest",
+    "code-review"
+  ],
+  "homepage": "https://github.com/Aayan15728/boring-security#readme",
+  "bugs": {
+    "url": "https://github.com/Aayan15728/boring-security/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aayan15728/boring-security.git"
+  },
   "license": "MIT",
+  "bin": {
+    "boring-security": "install.cjs"
+  },
+  "files": [
+    "install.cjs",
+    ".claude-plugin/",
+    "agents/",
+    "commands/",
+    "hooks/hooks.json",
+    "hooks/*.cjs",
+    "skills/",
+    "!skills/boring-security/scripts/test/",
+    "docs/",
+    "INSTALL.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "CREDITS.md"
+  ],
   "engines": {
     "node": ">=18"
   },

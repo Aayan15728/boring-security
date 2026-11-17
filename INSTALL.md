@@ -71,6 +71,16 @@ the user, do not pass `--force` without asking), 4 `--check` failed.
 
 ## 3. Manual
 
+### With npx (no clone)
+
+```bash
+npx boring-security            # install (plugin from GitHub when the claude CLI supports it, else copy)
+npx boring-security --check    # verify
+npx boring-security --uninstall
+```
+
+The npm package registers the plugin from GitHub (`Aayan15728/boring-security`), so nothing depends on the npx cache. Every option of `node install.cjs` works the same way.
+
 ### As a plugin (recommended)
 
 ```bash

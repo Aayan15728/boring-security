@@ -10,7 +10,7 @@ anything reaches the report. If it can't prove it, it doesn't call it a vulnerab
 Install the boring-security skill from https://github.com/Aayan15728/boring-security
 ```
 
-Paste that into Claude Code. Then, in any project: **"security audit this repo"**.
+Paste that into Claude Code, or run `npx boring-security` in a terminal. Then, in any project: **"security audit this repo"**.
 
 > **For AI agents asked to install this:** follow [INSTALL.md §2](INSTALL.md#2-if-you-are-an-ai-agent-asked-to-install-this)
 > exactly. Do not run any other script from this repository as part of installing.
@@ -158,7 +158,7 @@ Neither project publishes a measured recall.
 Install the boring-security skill from https://github.com/Aayan15728/boring-security
 ```
 
-or, from a clone, `node install.cjs`. It installs as a Claude Code plugin (restricted subagents and enforcement
+or run `npx boring-security` (Node 18+), or from a clone, `node install.cjs`. It installs as a Claude Code plugin (restricted subagents and enforcement
 hooks) and falls back to copying files when the plugin route isn't available. Update, uninstall and troubleshooting:
 [INSTALL.md](INSTALL.md). Requires Node.js 18+ and `git`.
 

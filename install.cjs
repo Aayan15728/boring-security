@@ -29,6 +29,11 @@ const SKIP_REL_DIRS = new Set(['scripts/test']); // relative to the skill direct
 const TRANSIENT = /(\.bs-tmp-|\.tmp(\.|$)|\.(bak|orig|swp|rej)$|~$)/; // editor/atomic-write leftovers
 const SELF_TEST_MODULES = ['lib.cjs', 'detect-rules.cjs', 'check-findings.cjs', 'check-ledger.cjs'];
 const ROOT = __dirname;
+// A git checkout is registered in place; an npm/npx copy lives in a package cache that can be cleaned,
+// so the plugin is registered from GitHub instead and Claude Code keeps its own copy.
+const GITHUB_SOURCE = 'Aayan15728/boring-security';
+const FROM_CHECKOUT = fs.existsSync(path.join(ROOT, '.git'));
+const MARKETPLACE_SOURCE = FROM_CHECKOUT ? ROOT : GITHUB_SOURCE;
 
 const EXIT = { OK: 0, ERROR: 1, USAGE: 2, CONFLICT: 3, CHECK_FAILED: 4 };
 
@@ -287,7 +292,7 @@ function lastLines(text, n) { return text.split(/\r?\n/).slice(-n).join('\n    '
 function pluginSteps(o) {
   const scope = o.project ? 'project' : 'user';
   const steps = [
-    { label: 'add marketplace', args: ['plugin', 'marketplace', 'add', ROOT, '--scope', 'user'], tolerate: /already/i },
+    { label: 'add marketplace', args: ['plugin', 'marketplace', 'add', MARKETPLACE_SOURCE, '--scope', 'user'], tolerate: /already/i },
     { label: 'install plugin', args: ['plugin', 'install', PLUGIN_ID, '--scope', scope], tolerate: null, onAlready: ['plugin', 'update', PLUGIN_ID, '--scope', scope] },
   ];
   return { steps, scope, cwd: o.project ? path.resolve(o.project) : undefined };
@@ -317,10 +322,12 @@ function installPlugin(o, bin, version) {
   warnIfCopyInstallExists(o);
   out('');
   out('Installed as the plugin ' + PLUGIN_ID + ' (slash commands, skill, subagents and hooks).');
-  out('The plugin loads in place from this checkout, so keep it at: ' + ROOT);
+  if (FROM_CHECKOUT) out('The plugin loads in place from this checkout, so keep it at: ' + ROOT);
+  else out('Registered from GitHub (' + GITHUB_SOURCE + '); Claude Code keeps its own copy.');
   out('Next: restart Claude Code or start a new session (or run /reload-plugins), then try /quick-audit');
   out('or ask: "security audit this repo".');
-  out('Update: git pull in this folder, then node install.cjs again. Remove: node install.cjs --uninstall');
+  if (FROM_CHECKOUT) out('Update: git pull in this folder, then node install.cjs again. Remove: node install.cjs --uninstall');
+  else out('Update: npx boring-security@latest. Remove: npx boring-security --uninstall');
 }
 
 // ---------------------------------------------------------------- copy route
