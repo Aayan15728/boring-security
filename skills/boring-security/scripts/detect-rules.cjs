@@ -1,11 +1,24 @@
 'use strict';
 // Deterministic detector rules. A hit is a LEAD for a Hunter, never a finding.
-// Each rule carries `bad` (must match) and `good` (must not match) examples; tests enforce both.
 //
-// Fields: id, cls (ledger class ref), conf (high|medium|low), files (extension group or
+// Three kinds of rule:
+//  - line (default): `pattern` is tested per line, and again over joined continuation windows
+//    (a line ending in `(`, `,`, `+`, `=`, `.`, `&&`, `||` plus up to 4 following lines).
+//    Examples: `bad` (must match) and `good` (must not match), one line each; tests enforce both.
+//  - kind: 'file': the file (path `files`, optional `requires`) must contain `match` somewhere and
+//    must NOT match `unlessFile` anywhere ("missing control"). Reported once, at the first `match` line.
+//  - kind: 'aggregate': `run({ files: [{path, text}], paths })` runs once over every scanned file
+//    whose path matches `files` and returns [{file, line, snippet}].
+//  File and aggregate rules carry `badFiles` / `goodFiles`: each entry is one test case, either a
+//  single {path, text} or an array of them (a small repo). Bad cases must hit, good cases must not.
+//
+// Line-rule fields: id, cls (ledger class ref), conf (high|medium|low), files (extension group or
 // filename regex), pattern (line regex), unless (line regex that cancels a hit), requires (file
-// must also match), unlessFile (file must NOT match), secret (redact the snippet), once (report
-// the first hit per file only), nameOnly (match on file name alone), verify (what a Hunter must check).
+// must also match), unlessFile (file must NOT match), secret (redact the snippet: nothing after
+// the match is shown and `keep` is the only part of the match that survives, default 4 chars),
+// once (first hit per file only), nameOnly (match on file name alone), noWindow (skip the
+// multi-line pass), verify (what a Hunter must check). Rules whose id starts with `secret.` also
+// run on test/fixture paths and on over-long lines.
 
 const G = {
   js: /\.(?:[cm]?jsx?|tsx?|vue|svelte)$/i,
@@ -41,10 +54,41 @@ const C = {
 };
 const REQ = String.raw`(?:req\.(?:query|params|body)|request\.(?:args|GET|POST|form|json|data|params|files)|params\[|\$_(?:GET|POST|REQUEST|COOKIE)|ctx\.(?:query|request))`;
 const rx = (s, f = '') => new RegExp(s, f);
+const AS = (n) => `packs/app-stack.md#${n}`;
+const APP = {
+  rls: AS('Database exposed without row-level policy'),
+  key: AS('Privileged key in client-reachable code'),
+  route: AS('Unauthenticated server route or action'),
+  trust: AS('Client-trusted price, role or ownership'),
+  hook: AS('Webhook without signature verification'),
+  paid: AS('Paid or model endpoint without auth and limits'),
+  storage: AS('Storage bucket and upload exposure'),
+  ship: AS('Secrets and source shipped to the browser'),
+  authp: AS('Auth provider misbinding'),
+};
+
+// base64url fragments that appear in any encoding of `word`, whatever its offset (0, 1 or 2 mod 3).
+const b64 = (s) => Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function b64Fragments(word) {
+  return [0, 1, 2].map((k) => b64('\0'.repeat(k) + word).slice(Math.ceil((8 * k) / 6), Math.floor((8 * (k + word.length)) / 6)));
+}
+const SERVICE_ROLE_B64 = b64Fragments('service_role').join('|');
+// Obviously fake JWTs for the examples (signature is a literal word).
+const FAKE_JWT = (payload) => ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9', b64(payload), 'fakesignaturefakesignature'].join('.');
+const JWT_SR = FAKE_JWT('{"iss":"supabase","role":"service_role"}');
+const JWT_ANON = FAKE_JWT('{"iss":"supabase","role":"anon"}');
+
+// Next.js style route handlers and API routes.
+const ROUTE_FILE = String.raw`(?:^|.*\/)(?:app\/(?:[^/]+\/)*route\.[cm]?[jt]sx?|pages\/api\/(?:[^/]+\/)*[^/]+\.[cm]?[jt]sx?)$`;
+const AUTH_CALL = String.raw`\bauth\s*\(|\bgetServerSession\b|\bgetUser\s*\(|\bcurrentUser\b|\bgetSession\s*\(|\bverifyIdToken\b|\brequireAuth\b|\bwithAuth\b|\bjwt\.verify\b|\bjwtVerify\b|\bgetToken\s*\(|\bgetAuth\s*\(|\bauthorization\b|\bverifySession\b|\bvalidateSession\b|\brequireUser\b|\bisAuthenticated\b|\bgetKindeServerSession\b|\bwithApiAuthRequired\b|\bgetClaims\s*\(|\bauth\.protect\b|\bclerkClient\b|\bensureAuth\w*\b|\bcheckAuth\w*\b`;
+const RATE_LIMIT = String.raw`rate.?limit|\blimiter\b|throttle|slowDown|\bquota\b`;
+const WEBHOOK_VERIFY = String.raw`constructEvent(?:Async)?\s*\(|verifyHeader|\bnew\s+Webhook\s*\(|\.verify\s*\(|createHmac|timingSafeEqual|x-hub-signature|verifyWebhook|validateWebhook|verifySignature|verify_signature|unwrap\s*\(|compare_digest|hmac\.new|validateRequest|constructWebhookEvent|webhooks\.verify`;
+const REQ_BODY = String.raw`(?:req\.body|request\.body|body|input|payload|await\s+(?:req|request)\.json\(\))`;
+const PAYMENT = /stripe|paymentIntents|checkout\.sessions|charges\.create|razorpay|paypal|lemonsqueezy|paddle|braintree|mollie|adyen|square/i;
 
 module.exports = [
   // ---------------- secrets ----------------
-  { id: 'secret.private-key', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+  { id: 'secret.private-key', cls: C.crypto, conf: 'high', files: G.any, secret: true, keep: /^-----BEGIN [A-Z ]*PRIVATE KEY-----/,
     pattern: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/,
     verify: 'Is the key real and used anywhere (signing, TLS, SSH)? Rotate if it ever shipped.',
     bad: ['-----BEGIN RSA PRIVATE KEY-----'], good: ['-----BEGIN PUBLIC KEY-----'] },
@@ -76,16 +120,17 @@ module.exports = [
     pattern: /\b(?:NEXT_PUBLIC|VITE|EXPO_PUBLIC|REACT_APP|NUXT_PUBLIC|PUBLIC)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE|ADMIN)[A-Z0-9_]*/,
     verify: 'Variables with a public prefix are bundled into client code. Confirm what the value grants.',
     bad: ['const k = process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY'], good: ['const k = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY'] },
-  { id: 'secret.hardcoded-credential', cls: C.crypto, conf: 'medium', files: G.code, secret: true,
+  { id: 'secret.hardcoded-credential', cls: C.crypto, conf: 'medium', files: G.code, secret: true, keep: /^[^:=]*[:=]\s*["']?/,
     pattern: /\b(?:password|passwd|pwd|secret|api_?key|access_?token|auth_?token|client_?secret|private_?key)\b["']?\s*[:=]\s*["'][^"'\s]{8,}["']/i,
     unless: /example|changeme|placeholder|your[_-]|xxx|<[^>]+>|\$\{|process\.env|os\.environ|getenv|dummy|fake|sample|redacted|\*\*\*/i,
     verify: 'Is it a real credential in production code (not a test fixture)? What does it unlock?',
     bad: ['const password = "Sup3rS3cretValue"'], good: ['const password = process.env.DB_PASSWORD'] },
-  { id: 'secret.jwt-literal-secret', cls: C.crypto, conf: 'high', files: G.js, secret: true,
+  { id: 'secret.jwt-literal-secret', cls: C.crypto, conf: 'high', files: G.js, secret: true, keep: /^jwt\.\w+\s*\(/,
     pattern: /\bjwt\.(?:sign|verify)\s*\([^,]+,\s*["'`][^"'`]{4,}["'`]/,
     verify: 'A hardcoded signing secret lets anyone holding the source mint tokens.',
     bad: ['jwt.sign(payload, "mysecret123")'], good: ['jwt.sign(payload, process.env.JWT_SECRET)'] },
   { id: 'secret.dotenv-committed', cls: C.obv, conf: 'medium', files: /(?:^|\/)\.env(?:\.(?!example|sample|template|dist|defaults)[\w.-]+)?$/i, once: true, secret: true,
+    keep: /^\s*[A-Z][A-Z0-9_]*\s*=\s*/,
     pattern: /^\s*[A-Z][A-Z0-9_]*\s*=\s*\S{6,}/,
     verify: 'Committed env file: check git tracking, real values, and history.',
     bad: ['DATABASE_URL=postgres://u:p@host/db'], good: ['# comment only'] },
@@ -93,20 +138,72 @@ module.exports = [
     files: /(?:^|\/)(?:id_rsa|id_ed25519|[^/]*\.(?:pem|p12|pfx|jks|keystore)|credentials\.json|service[-_]?account[^/]*\.json)$/i,
     verify: 'Key or credential file in the repo: real or test? Tracked by git?',
     bad: ['config/service-account-prod.json'], good: ['config/settings.json'] },
+  { id: 'secret.db-url-password', cls: C.crypto, conf: 'high', files: G.any, secret: true, keep: /^[a-z+]+:\/\//i,
+    pattern: /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?):\/\/[^\s:\/@"'`]{1,128}:(?!(?:password|passwd|pass|pwd|changeme|change_?me|replace_?me|changeit|secret|example|xxx+|your[\w-]*|dummy|placeholder|redacted)@)(?![$<{%*])[^\s@"'`\/]{1,256}@[^\s"'`]+/i,
+    unless: /@(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?:[:/]|$)/i, // local throwaway databases
+    verify: 'Database/broker URL with an inline password: is it a real environment (not a local throwaway)? Rotate and move it to a secret store.',
+    bad: ['DATABASE_URL="postgres://app:hunter2hunter2@db.internal:5432/app"', 'mongodb+srv://svc:fakefakefake@cluster0.example.net/db'],
+    good: ['DATABASE_URL="postgres://app:${DB_PASSWORD}@db.internal/app"', 'url = "postgresql://user:password@db.internal:5432/db"', 'redis://localhost:6379',
+      'DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres', 'DATABASE_URL=postgres://notes:replace_me@db.internal:5432/notes'] },
+  { id: 'secret.supabase-service-role-jwt', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: rx(String.raw`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{0,400}?(?:` + SERVICE_ROLE_B64 + String.raw`)[A-Za-z0-9_-]{0,400}\.[A-Za-z0-9_-]{10,}|(?:service_?role|SERVICE_?ROLE|serviceRole)\w{0,30}["']?\s*[:=]\s*["'` + '`' + String.raw`]?eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+    verify: 'A service-role JWT bypasses every row-level policy. Is it reachable from client code or the repo history? Rotate the JWT secret.',
+    bad: [`const key = "${JWT_SR}"`, `SUPABASE_SERVICE_ROLE_KEY=${JWT_ANON}`], good: [`const anon = "${JWT_ANON}"`, 'SUPABASE_SERVICE_ROLE_KEY=process.env.KEY'] },
+  { id: 'secret.jwt-assigned', cls: C.crypto, conf: 'medium', files: G.any, secret: true,
+    pattern: /\b\w{0,40}?(?:key|secret|token|jwt|KEY|SECRET|TOKEN|JWT|Key|Secret|Token)\w{0,40}["']?\s*[:=]\s*["'`]?eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+    unless: /anon|ANON|public|PUBLIC|publishable|PUBLISHABLE|example|EXAMPLE/,
+    verify: 'Signed token literal: decode it (do not trust it) and check its role, audience and expiry. Long-lived bearer tokens are credentials.',
+    bad: [`const adminToken = "${JWT_ANON.replace('fakesignature', 'fakesig')}"`], good: [`const SUPABASE_ANON_KEY = "${JWT_ANON}"`] },
+  { id: 'secret.gitlab-token', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: /\bglpat-[A-Za-z0-9_-]{20,}/,
+    verify: 'GitLab personal access token: scopes and project access; revoke it.',
+    bad: ['GITLAB_TOKEN=glpat' + '-FAKEfakeFAKEfake0000'], good: ['GITLAB_TOKEN=$CI_JOB_TOKEN'] },
+  { id: 'secret.npm-token', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: /\bnpm_[A-Za-z0-9]{36}\b/,
+    verify: 'npm automation/publish token: which packages can it publish? Revoke it.',
+    bad: ['//registry.npmjs.org/:_authToken=npm_FAKEfake0000FAKEfake0000FAKEfake0000'], good: ['//registry.npmjs.org/:_authToken=${NPM_TOKEN}'] },
+  { id: 'secret.sendgrid-key', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/,
+    verify: 'SendGrid API key: can it send mail as the domain (phishing) or read contacts?',
+    bad: ['sgMail.setApiKey("SG' + '.FAKEfakeFAKEfake000000.FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake000")'], good: ['sgMail.setApiKey(process.env.SENDGRID_API_KEY)'] },
+  { id: 'secret.huggingface-token', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: /\bhf_[A-Za-z0-9]{34,}\b/,
+    verify: 'Hugging Face token: write scope, private models/datasets, paid inference.',
+    bad: ['HF_TOKEN="hf_FAKEfakeFAKEfakeFAKEfakeFAKEfake00"'], good: ['HF_TOKEN=os.environ["HF_TOKEN"]'] },
+  { id: 'secret.twilio-credential', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: /\bAC[0-9a-f]{32}:[0-9a-f]{32}\b|\btwilio\w{0,20}(?:auth_?token|secret)\w{0,10}["']?\s*[:=]\s*["']?[0-9a-f]{32}\b/i,
+    verify: 'Twilio auth token: SMS/voice spend and account takeover of the messaging channel.',
+    bad: ['TWILIO_AUTH_TOKEN="0123456789abcdef0123456789abcdef"'], good: ['TWILIO_AUTH_TOKEN=process.env.TWILIO_AUTH_TOKEN'] },
+  { id: 'secret.telegram-bot-token', cls: C.crypto, conf: 'high', files: G.any, secret: true,
+    pattern: /\b\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])/,
+    verify: 'Telegram bot token: anyone holding it controls the bot and reads its messages.',
+    bad: ['BOT_TOKEN = "123456789:AAFAKEfakeFAKEfakeFAKEfakeFAKEfake0"'], good: ['BOT_TOKEN = os.getenv("BOT_TOKEN")'] },
+  { id: 'secret.chat-webhook-url', cls: C.crypto, conf: 'high', files: G.any, secret: true, keep: /^https:\/\/[^/]+\//,
+    pattern: /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]{20,}|https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d{17,20}\/[A-Za-z0-9_-]{60,}/,
+    unless: /X{12,}|x{12,}/,
+    verify: 'Incoming webhook URL: anyone can post messages (phishing in a trusted channel). Rotate it.',
+    bad: ['url: "https://hooks.slack' + '.com/services/T0FAKE000/B0FAKE000/FAKEfakeFAKEfake0000FAKE"', 'https://discord.com/api/webhooks/123456789012345678/FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake0000'],
+    good: ['https://hooks.slack' + '.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX', 'url: process.env.SLACK_WEBHOOK_URL'] },
+  { id: 'secret.service-account-json', cls: C.crypto, conf: 'high', files: /\.json$/i, requires: /"private_key"\s*:/,
+    pattern: /"type"\s*:\s*"service_account"/,
+    verify: 'Cloud service-account key file with a private key: which project roles does the account hold? Delete the key.',
+    bad: ['  "type": "service_account",'], good: ['  "type": "authorized_user",'] },
 
   // ---------------- injection ----------------
   { id: 'inj.sql-concat-js', cls: C.inj, conf: 'high', files: G.js,
-    pattern: /\.(?:query|execute|raw|unsafe|whereRaw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(?:`[^`]*\$\{|["'][^"']*["']\s*\+)/,
+    pattern: /\.(?:query|execute|raw|unsafe|whereRaw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(?:`[^`]*\$\{|(?:"[^"]*"|'[^']*')\s*\+)/,
     verify: 'Is the interpolated value attacker-controlled? Use parameters / tagged templates.',
-    bad: ['db.query(`SELECT * FROM users WHERE id = ${req.params.id}`)'], good: ['db.query("SELECT * FROM users WHERE id = $1", [id])'] },
+    bad: ['db.query(`SELECT * FROM users WHERE id = ${req.params.id}`)', String.raw`db.query("SELECT * FROM users WHERE team = '" + team + "'")`, String.raw`db.query('SELECT * FROM t WHERE n = "' + n + '"')`],
+    good: ['db.query("SELECT * FROM users WHERE id = $1", [id])', String.raw`db.query("SELECT * FROM t WHERE n = 'x'", [])`] },
   { id: 'inj.prisma-raw-unsafe', cls: C.inj, conf: 'medium', files: G.js,
     pattern: /\$(?:queryRawUnsafe|executeRawUnsafe)\s*\(/, unless: /Unsafe\s*\(\s*`[^`]*\$\{/, // that form is inj.sql-concat-js
     verify: 'Unsafe raw API: trace the string argument. Prefer $queryRaw tagged template.',
     bad: ['await prisma.$queryRawUnsafe(sql)'], good: ['await prisma.$queryRaw`SELECT 1`'] },
   { id: 'inj.sql-format-py', cls: C.inj, conf: 'high', files: G.py,
-    pattern: /\.(?:execute|executemany|raw|extra)\s*\(\s*(?:f["']|["'][^"']*["']\s*(?:%\s*[\w(]|\.format\(|\+))/,
+    pattern: /\.(?:execute|executemany|raw|extra)\s*\(\s*(?:f["']|(?:"[^"]*"|'[^']*')\s*(?:%\s*[\w(]|\.format\(|\+))/,
     verify: 'Trace the formatted values to request input; use driver parameters.',
-    bad: ['cur.execute(f"SELECT * FROM t WHERE id={uid}")'], good: ['cur.execute("SELECT * FROM t WHERE id=%s", (uid,))'] },
+    bad: ['cur.execute(f"SELECT * FROM t WHERE id={uid}")', String.raw`cur.execute("SELECT * FROM t WHERE n = '" + name + "'")`, String.raw`cur.execute("SELECT * FROM t WHERE n = '%s'" % name)`],
+    good: ['cur.execute("SELECT * FROM t WHERE id=%s", (uid,))', String.raw`cur.execute("SELECT * FROM t WHERE n = 'x'")`] },
   { id: 'inj.sql-concat-go', cls: C.inj, conf: 'high', files: G.go,
     pattern: /\.(?:Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext|Raw)\s*\([^)]*(?:fmt\.Sprintf|"\s*\+\s*\w)/,
     verify: 'Use placeholders instead of Sprintf/concatenation.',
@@ -124,7 +221,7 @@ module.exports = [
     verify: 'Request objects can carry $ne/$gt/$where operators. Cast fields to expected types.',
     bad: ['User.findOne(req.body)'], good: ['User.findOne({ email: String(req.body.email) })'] },
   { id: 'inj.cmd-exec-js', cls: C.inj, conf: 'high', files: G.js, requires: /child_process|execa|shelljs/,
-    pattern: /\b(?:exec|execSync)\s*\(\s*(?:`[^`]*\$\{|["'][^"']*["']\s*\+)/,
+    pattern: /\b(?:exec|execSync)\s*\(\s*(?:`[^`]*\$\{|(?:"[^"]*"|'[^']*')\s*\+)/,
     verify: 'Shell string built from variables; use execFile/spawn with an args array.',
     bad: ['exec(`convert ${file} out.png`)'], good: ['execFile("convert", [file, "out.png"])'] },
   { id: 'inj.spawn-shell', cls: C.inj, conf: 'medium', files: G.js,
@@ -132,9 +229,9 @@ module.exports = [
     verify: 'shell:true re-enables shell parsing of arguments.',
     bad: ['spawn(cmd, args, { shell: true })'], good: ['spawn(cmd, args, { shell: false })'] },
   { id: 'inj.os-system-dynamic', cls: C.inj, conf: 'high', files: G.py,
-    pattern: /\bos\.(?:system|popen)\s*\(\s*(?!["'][^"']*["']\s*\))/,
+    pattern: /\bos\.(?:system|popen)\s*\(\s*(?!(?:"[^"]*"|'[^']*')\s*\))/,
     verify: 'Shell command from a non-constant string; use subprocess with a list.',
-    bad: ['os.system("rm " + path)'], good: ['os.system("ls")'] },
+    bad: ['os.system("rm " + path)', String.raw`os.system("rm '" + path + "'")`], good: ['os.system("ls")', String.raw`os.system("echo 'hi'")`] },
   { id: 'inj.subprocess-shell', cls: C.inj, conf: 'medium', files: G.py,
     pattern: /\bsubprocess\.\w+\s*\([^)]*shell\s*=\s*True/,
     verify: 'shell=True with any variable part is command injection if input reaches it.',
@@ -144,7 +241,7 @@ module.exports = [
     verify: 'Dynamic code evaluation: trace the argument to untrusted input.',
     bad: ['eval(userCode)'], good: ['eval("1+1")'] },
   { id: 'inj.eval-py', cls: C.inj, conf: 'medium', files: G.py,
-    pattern: /(?<![.\w])(?:eval|exec)\s*\(\s*(?!["'][^"']*["']\s*\))/,
+    pattern: /(?<![.\w])(?:eval|exec)\s*\(\s*(?!(?:"[^"]*"|'[^']*')\s*\))/,
     verify: 'Dynamic code evaluation: trace the argument to untrusted input.',
     bad: ['result = eval(expr)'], good: ['cursor.exec(query)'] },
   { id: 'inj.node-vm', cls: C.inj, conf: 'medium', files: G.js,
@@ -432,6 +529,89 @@ module.exports = [
     verify: 'Archive extraction without path validation (zip slip / tar traversal).',
     bad: ['tar.extractall(dest)'], good: ['tar.extractall(dest, filter="data")'] },
 
+  // ---------------- app stack (BaaS + Next.js style apps) ----------------
+  { id: 'app.table-without-rls', cls: APP.rls, conf: 'medium', kind: 'aggregate', files: /\.sql$/i,
+    run: rlsAggregate,
+    verify: 'Table created with no `enable row level security` in any scanned migration. If the API (PostgREST/Supabase) exposes this schema, anyone with the anon key can read and write it. Check the live database too: RLS may be enabled outside these files.',
+    badFiles: [
+      { path: 'supabase/migrations/001_init.sql', text: 'create table if not exists public.notes (\n  id bigint primary key,\n  body text\n);\n' },
+      [{ path: 'db/001.sql', text: 'create table profiles (id uuid primary key);\ncreate table orders (id uuid primary key);\n' },
+        { path: 'db/002.sql', text: '-- uses auth.uid() in policies\nalter table profiles enable row level security;\n' }],
+    ],
+    goodFiles: [
+      { path: 'supabase/migrations/001_init.sql', text: 'create table public.notes (id bigint primary key);\nalter table public.notes\n  enable row level security;\n' },
+      { path: 'db/schema.sql', text: 'create table notes (id bigint primary key);\n' },
+      [{ path: 'supabase/migrations/001.sql', text: 'create table "Profiles" (id uuid);\n' }, { path: 'supabase/migrations/002.sql', text: 'ALTER TABLE ONLY public."Profiles" ENABLE ROW LEVEL SECURITY;\n' }],
+    ] },
+  { id: 'app.policy-allows-all', cls: APP.rls, conf: 'medium', files: /\.sql$/i,
+    pattern: /\b(?:using|with\s+check)\s*\(\s*true\s*\)/i,
+    verify: 'Policy that allows every row: fine for deliberately public reads, a hole for writes or private data. Check the command (select/insert/update/delete) and the role (anon/authenticated).',
+    bad: ['create policy "all" on notes for update using (true);', 'create policy "ins" on notes for insert with check ( true );'],
+    good: ['create policy "own" on notes for select using (auth.uid() = user_id);'] },
+  { id: 'app.public-storage-bucket', cls: APP.storage, conf: 'low', files: /\.(?:sql|[cm]?[jt]sx?|py)$/i,
+    pattern: /\bcreateBucket\s*\([^)]{0,300}\bpublic\s*:\s*true|\binsert\s+into\s+storage\.buckets\b.{0,300}\btrue\b|\bupdate\s+storage\.buckets\s+set\s+public\s*=\s*true/i,
+    verify: 'Public bucket: every object is readable by URL without auth. Does it hold user uploads, invoices or anything private? Are upload paths and types restricted?',
+    bad: ['await supabase.storage.createBucket("uploads", { public: true })', "insert into storage.buckets (id, name, public) values ('docs', 'docs', true);"],
+    good: ['await supabase.storage.createBucket("uploads", { public: false })'] },
+  { id: 'app.privileged-key-in-client', cls: APP.key, conf: 'high', files: G.js, requires: /^\s*["']use client["']/m,
+    pattern: /SERVICE_?ROLE|service_?role|serviceRole|\bsk_live_|STRIPE_SECRET|SECRET_KEY|PRIVATE_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|\b[A-Z0-9_]*_SECRET\b/,
+    verify: "A 'use client' module is bundled for the browser. Does this privileged key (or code that needs it) end up in the client bundle? Server-only env vars read here are undefined in the browser, so check what actually ships.",
+    bad: ['const admin = createClient(url, process.env.SUPABASE_SERVICE_ROLE_KEY!)'], good: ['const sb = createClient(url, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)'] },
+  { id: 'app.client-trusted-price', cls: APP.trust, conf: 'medium', files: G.code, requires: PAYMENT,
+    pattern: rx(String.raw`\b(?:unit_amount|unitAmount|amount|price|total)\s*:\s*(?:Number|parseInt|parseFloat|Math\.round)?\s*\(?\s*` + REQ_BODY + String.raw`\??\.\w{0,30}(?:price|amount|total|cost)\w{0,20}|\{[^{}]{0,200}\b(?:price|amount|total|unit_amount)\b[^{}]{0,200}\}\s*=\s*(?:req\.body|await\s+(?:req|request)\.json\(\))`, 'i'),
+    verify: 'The charged amount comes from the request. Can a caller pay 1 cent? The server must look the price up from its own catalog by product id.',
+    bad: ['  amount: req.body.amount,', 'unit_amount: Math.round(body.price * 100),', 'const { priceId, amount } = await req.json()'],
+    good: ['  amount: product.priceCents,', 'const { productId } = await req.json()'] },
+  { id: 'app.client-trusted-role-owner', cls: APP.trust, conf: 'medium', files: G.code,
+    pattern: rx(String.raw`\b(?:role|isAdmin|is_admin|userId|user_id|ownerId|owner_id)\s*:\s*` + REQ_BODY + String.raw`\??\.(?:role|isAdmin|is_admin|userId|user_id|ownerId|owner_id)\b|\{[^{}]{0,200}\b(?:role|isAdmin|is_admin|userId|user_id|ownerId|owner_id)\b[^{}]{0,200}\}\s*=\s*(?:req\.body|request\.body|await\s+(?:req|request)\.json\(\))|formData\.get\(\s*["'](?:role|userId|user_id|ownerId|owner_id)["']\s*\)|request\.(?:json|data|form|POST)\s*\[\s*["'](?:role|is_admin|user_id|owner_id)["']\s*\]`),
+    verify: 'Role or owner id taken from the request: can a caller make themselves admin or act on another user? The server must derive identity from the session.',
+    bad: ['  user_id: body.user_id,', 'const { title, userId } = await req.json()', 'role = request.json["role"]'],
+    good: ['  user_id: session.user.id,', 'const { title } = await req.json()'] },
+  { id: 'app.prod-source-maps', cls: APP.ship, conf: 'medium', files: /\.(?:[cm]?[jt]s|json)$|(?:^|\/)\.env[^/]*$/i,
+    pattern: /productionBrowserSourceMaps\s*:\s*true|GENERATE_SOURCEMAP\s*=\s*["']?true/,
+    verify: 'Production source maps publish the original source (comments, internal routes, sometimes inlined secrets). Is that intended?',
+    bad: ['  productionBrowserSourceMaps: true,', 'GENERATE_SOURCEMAP=true'], good: ['  productionBrowserSourceMaps: false,', 'GENERATE_SOURCEMAP=false'] },
+  { id: 'app.supabase-getsession-server', cls: APP.authp, conf: 'medium', files: G.js,
+    requires: /["']use server["']|createServerClient|createRouteHandlerClient|createServerComponentClient|NextResponse|NextRequest|getServerSideProps|export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|PATCH|DELETE|middleware)\b/,
+    unlessFile: /\.auth\.getUser\s*\(|\.auth\.getClaims\s*\(/,
+    pattern: /\.auth\.getSession\s*\(/,
+    verify: 'Server-side getSession() reads the session from cookies without revalidating it with the auth server; a forged cookie passes. Use getUser()/getClaims() for authorization decisions.',
+    bad: ['const { data: { session } } = await supabase.auth.getSession()'], good: ['const { data: { user } } = await supabase.auth.getUser()'] },
+  { id: 'app.webhook-unverified', cls: APP.hook, conf: 'medium', kind: 'file',
+    files: /^(?=.*webhook).*\.(?:[cm]?[jt]sx?|py|go|rb|php)$/i,
+    match: /\b(?:stripe|svix|clerk|github|paddle|lemon_?squeezy|shopify|razorpay|paypal|resend|polar|twilio|supabase)\b/i,
+    unlessFile: rx(WEBHOOK_VERIFY, 'i'),
+    verify: 'Webhook handler with no signature check in this file: anyone can POST forged events (paid, subscription active, user created). Check whether a shared helper or middleware verifies the signature on the raw body.',
+    badFiles: [{ path: 'app/api/webhooks/stripe/route.ts', text: "import Stripe from 'stripe';\nexport async function POST(req: Request) {\n  const event = await req.json();\n  if (event.type === 'checkout.session.completed') await markPaid(event.data.object.id);\n  return new Response('ok');\n}\n" }],
+    goodFiles: [
+      { path: 'app/api/webhooks/stripe/route.ts', text: "import Stripe from 'stripe';\nexport async function POST(req: Request) {\n  const sig = req.headers.get('stripe-signature')!;\n  const event = stripe.webhooks.constructEvent(await req.text(), sig, secret);\n  return new Response('ok');\n}\n" },
+      { path: 'app/api/webhooks/clerk/route.ts', text: "import { Webhook } from 'svix';\nexport async function POST(req: Request) {\n  const evt = new Webhook(secret).verify(payload, headers);\n}\n" },
+    ] },
+  { id: 'app.route-without-auth', cls: APP.route, conf: 'low', kind: 'file',
+    files: rx(String.raw`^(?!.*(?:webhook|cron))` + ROUTE_FILE, 'i'),
+    requires: /\b(?:POST|PUT|PATCH|DELETE)\b|req\.body|request\.json\(/,
+    match: /\bexport\s+(?:async\s+)?function\s+(?:POST|PUT|PATCH|DELETE)\b|\bexport\s+const\s+(?:POST|PUT|PATCH|DELETE)\s*=|\bexport\s*\{[^}]{0,200}\b(?:POST|PUT|PATCH|DELETE)\b|\bexport\s+default\b/,
+    unlessFile: rx(AUTH_CALL + '|' + WEBHOOK_VERIFY + String.raw`|CRON_SECRET|x-api-key|\bbearer\b`, 'i'),
+    verify: 'Mutating route handler with no auth-looking call in the file. Middleware (middleware.ts matcher, a wrapper, an API gateway) may cover it: check that before reporting. If it is reachable unauthenticated, what can a caller change?',
+    badFiles: [{ path: 'app/api/posts/route.ts', text: "import { db } from '@/db';\nexport async function POST(req: Request) {\n  const body = await req.json();\n  await db.post.create({ data: { title: body.title } });\n  return Response.json({ ok: true });\n}\n" },
+      { path: 'pages/api/delete-user.ts', text: 'export default async function handler(req, res) {\n  if (req.method === "DELETE") await db.user.delete({ where: { id: req.body.id } });\n  res.end();\n}\n' }],
+    goodFiles: [{ path: 'app/api/posts/route.ts', text: "import { auth } from '@/auth';\nexport async function POST(req: Request) {\n  const session = await auth();\n  if (!session) return new Response(null, { status: 401 });\n}\n" },
+      { path: 'app/api/posts/route.ts', text: 'export async function GET() {\n  return Response.json(await listPosts());\n}\n' }] },
+  { id: 'app.server-action-without-auth', cls: APP.route, conf: 'low', kind: 'file', files: G.js,
+    requires: /^\s*["']use server["']/m,
+    match: /^\s*export\s+(?:async\s+function\b|const\s+\w+\s*=\s*async\b)/m,
+    unlessFile: rx(AUTH_CALL, 'i'),
+    verify: "Server actions are public POST endpoints. This 'use server' file has no auth-looking call: middleware may cover the page but not the action itself. Can an anonymous or other user invoke it?",
+    badFiles: [{ path: 'app/actions.ts', text: "'use server';\nexport async function deleteNote(id: string) {\n  await db.note.delete({ where: { id } });\n}\n" }],
+    goodFiles: [{ path: 'app/actions.ts', text: "'use server';\nexport async function deleteNote(id: string) {\n  const user = await currentUser();\n  await db.note.delete({ where: { id, ownerId: user.id } });\n}\n" }] },
+  { id: 'app.paid-endpoint-unprotected', cls: APP.paid, conf: 'medium', kind: 'file',
+    files: rx(ROUTE_FILE, 'i'),
+    match: /\b(?:openai|OpenAI|anthropic|Anthropic|generateText|streamText|generateObject|streamObject|generateImage|replicate|Replicate|fal\.(?:run|subscribe)|@fal-ai|groq|Groq|mistral|cohere|elevenlabs|chat\.completions|messages\.create|images\.generate|embeddings\.create)\b/,
+    unlessFile: rx(AUTH_CALL + '|' + RATE_LIMIT, 'i'),
+    verify: 'Route calls a paid/model API with no auth-looking call and no rate limit in the file: anyone can spend the key (denial of wallet) or use it as a free proxy. Check middleware and provider spend caps.',
+    badFiles: [{ path: 'app/api/chat/route.ts', text: "import { openai } from '@ai-sdk/openai';\nimport { streamText } from 'ai';\nexport async function POST(req: Request) {\n  const { messages } = await req.json();\n  return streamText({ model: openai('gpt-4o'), messages }).toDataStreamResponse();\n}\n" }],
+    goodFiles: [{ path: 'app/api/chat/route.ts', text: "import { streamText } from 'ai';\nimport { ratelimit } from '@/lib/ratelimit';\nexport async function POST(req: Request) {\n  const { success } = await ratelimit.limit(ip);\n  return streamText({ model, messages });\n}\n" }] },
+
   // ---------------- hygiene ----------------
   { id: 'hygiene.security-todo', cls: C.obv, conf: 'low', files: G.code,
     pattern: /\b(?:TODO|FIXME|HACK|XXX)\b[^\n]*\b(?:auth|authz|permission|security|csrf|xss|sanitiz|validat|injection|insecure|bypass|vuln)/i,
@@ -446,4 +626,32 @@ module.exports = [
     verify: 'Hardening only, unless the schema exposes hidden privileged operations.',
     bad: ['new ApolloServer({ schema, introspection: true })'], good: ['new ApolloServer({ schema })'] },
 ];
+
+// Aggregate: tables created without `enable row level security` anywhere in the scanned SQL.
+// Only when the repo looks like Supabase / Postgres-with-RLS. Comments are blanked (offsets kept).
+function rlsAggregate({ files, paths }) {
+  const sql = files.filter((f) => /\.sql$/i.test(f.path));
+  const looksRls = paths.some((p) => /(?:^|\/)supabase\//i.test(p))
+    || sql.some((f) => /\bauth\.uid\s*\(\s*\)|\brow\s+level\s+security\b/i.test(f.text));
+  if (!looksRls) return [];
+  const ident = String.raw`(?:"([^"]{1,63})"|([A-Za-z_][\w$]{0,62}))`;
+  const schema = String.raw`(?:(?:"public"|public)\s*\.\s*)?`;
+  const CREATE = rx(String.raw`\bcreate\s+(?:(?:global\s+|local\s+)?(?:temp|temporary|unlogged)\s+)?table\s+(?:if\s+not\s+exists\s+)?` + schema + ident + String.raw`\s*\(`, 'gi');
+  const ENABLE = rx(String.raw`\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?` + schema + ident + String.raw`\s+enable\s+row\s+level\s+security\b`, 'gi');
+  const key = (m) => (m[1] !== undefined ? m[1] : m[2].toLowerCase());
+  const enabled = new Set();
+  const created = new Map();
+  for (const f of sql) {
+    const body = f.text.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
+    for (const m of body.matchAll(ENABLE)) enabled.add(key(m));
+    for (const m of body.matchAll(CREATE)) {
+      const k = key(m);
+      if (created.has(k)) continue;
+      const line = body.slice(0, m.index).split('\n').length;
+      created.set(k, { file: f.path, line, snippet: f.text.split(/\r?\n/)[line - 1] || m[0] });
+    }
+  }
+  return [...created].filter(([k]) => !enabled.has(k)).map(([, v]) => v);
+}
+
 module.exports.G = G;

@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 'use strict';
 // Validate findings.json against schema/findings.schema.json (the single source of truth for shape),
-// then the cross-record rules a schema can't express.
-// Usage: node check-findings.cjs <findings.json> [--ledger <ledger.json>]
-//   With --ledger, run.json next to the ledger (if present) decides whether unlinked candidates are fatal.
+// then the cross-record rules a schema can't express:
+//   - records sorted by fingerprint, no duplicates; trace order entrypoint -> propagation* -> sink
+//   - severity.overall <= severity.impact.level
+//   - confirmed execution.proof = "local": execution.evidence_files has >= 1 entry
+//   - confirmed execution.proof = "static": trace has >= 2 steps, entrypoint first, sink last
+// Usage: node check-findings.cjs <findings.json> [--ledger <ledger.json>] [--target <repo>]
+//   --ledger  cross-check fingerprints against the ledger; run.json next to the ledger (if present)
+//             decides whether unlinked candidates are fatal.
+//   --target  verify every trace/evidence quote against the target checkout (lib.quoteMatches rule:
+//             >= 10 chars and within 2 lines of `line`, or exactly the whole text of a nearby line).
 
 const fs = require('fs');
 const path = require('path');
-const { Reporter, loadJson, isObj, isArr, lintSchema, validateSchema } = require('./lib.cjs');
+const { Reporter, loadJson, LEDGER_LIMITS, hasOwn, isObj, isArr, isRelPath, lintSchema, validateSchema, quoteMatches, makeTargetReader, normWs, QUOTE_MIN_CHARS } = require('./lib.cjs');
 
 const SCHEMA_PATH = path.resolve(__dirname, '..', 'schema', 'findings.schema.json');
 const LEVELS = ['informational', 'low', 'medium', 'high', 'critical'];
@@ -49,6 +56,23 @@ function validateFindings(data, rep, schema = loadSchema()) {
       const o = LEVELS.indexOf(sev.overall); const im = LEVELS.indexOf(sev.impact.level);
       if (o >= 0 && im >= 0 && o > im) rep.err(w, `severity.overall "${sev.overall}" exceeds demonstrated impact "${sev.impact.level}"`);
     }
+    if (r.verdict === 'confirmed' && isObj(r.execution)) {
+      const ex = r.execution;
+      if (ex.proof === 'local') {
+        if (!isArr(ex.evidence_files) || !ex.evidence_files.length) rep.err(w, 'execution.proof "local" needs at least one execution.evidence_files entry');
+      } else if (ex.proof === 'static') {
+        const steps = isArr(r.trace) ? r.trace.map((t) => (isObj(t) ? t.step : undefined)) : [];
+        if (steps.length < 2 || steps[0] !== 'entrypoint' || steps[steps.length - 1] !== 'sink') {
+          rep.err(w, 'execution.proof "static" needs the whole path quoted: a trace of two or more steps from entrypoint to sink');
+        }
+      }
+    }
+    // Short quotes are only valid when they are a whole source line; that needs --target to verify.
+    for (const key of ['trace', 'evidence']) for (const [j, e] of (isArr(r[key]) ? r[key] : []).entries()) {
+      if (isObj(e) && typeof e.quote === 'string' && normWs(e.quote) && [...normWs(e.quote)].length < QUOTE_MIN_CHARS) {
+        rep.warn(`${w}.${key}[${j}]`, `quote shorter than ${QUOTE_MIN_CHARS} characters: valid only if it is the whole text of a nearby line (checked with --target)`);
+      }
+    }
   });
   return data;
 }
@@ -76,33 +100,21 @@ function crossCheckLedger(findings, ledger, rep, runStatus) {
   }
 }
 
-// Every trace/evidence quote must appear (whitespace-normalized) within ±2 lines of its cited line in the
-// target checkout, so a made-up location or excerpt fails. Files are read inside the target only.
-const norm = (s) => s.replace(/\s+/g, ' ').trim();
-function verifyQuotes(findings, target, rep) {
-  const root = path.resolve(target);
-  const cache = new Map();
-  const lines = (rel) => {
-    if (cache.has(rel)) return cache.get(rel);
-    let v = null;
-    try {
-      const realRoot = fs.realpathSync(root);
-      const full = fs.realpathSync(path.resolve(root, ...rel.split('/'))); // resolves symlinked dirs too
-      const inside = path.relative(realRoot, full);
-      const st = fs.statSync(full);
-      if (!inside.startsWith('..') && !path.isAbsolute(inside) && st.isFile() && st.size <= 5 * 1024 * 1024) v = fs.readFileSync(full, 'utf8').split(/\r?\n/);
-    } catch { /* missing */ }
-    cache.set(rel, v); return v;
-  };
-  findings.forEach((r, i) => {
+// Every trace/evidence quote must pass lib.quoteMatches against the target checkout, so a made-up
+// location or a trivially satisfiable excerpt (")", "e") fails. Files are read inside the target only
+// (symlinks resolving outside it are refused). `reader` is an optional lib.makeTargetReader(target) to share.
+function verifyQuotes(findings, target, rep, reader = makeTargetReader(target)) {
+  if (!reader.root) { rep.err('target', `${target} is not a readable directory`); return; }
+  (isArr(findings) ? findings : []).forEach((r, i) => {
     if (!isObj(r)) return;
     for (const key of ['trace', 'evidence']) for (const [j, e] of (isArr(r[key]) ? r[key] : []).entries()) {
       if (!isObj(e) || typeof e.file !== 'string' || typeof e.quote !== 'string' || !Number.isInteger(e.line)) continue;
       const w = `findings[${i}](${r.fingerprint}).${key}[${j}]`;
-      const ls = lines(e.file);
+      if (!isRelPath(e.file)) { rep.err(w, `${JSON.stringify(e.file)} not found as a regular file inside the target (not a safe repo-relative path)`); continue; }
+      const ls = reader.lines(e.file);
       if (!ls) { rep.err(w, `${e.file} not found as a regular file inside the target`); continue; }
-      const window = norm(ls.slice(Math.max(0, e.line - 3), e.line + 2).join(' '));
-      if (!window.includes(norm(e.quote))) rep.err(w, `quote not found near ${e.file}:${e.line}`);
+      const m = quoteMatches(ls, e.line, e.quote);
+      if (!m.ok) rep.err(w, `quote not found near ${e.file}:${e.line} (${m.why})`);
     }
   });
 }
@@ -110,7 +122,16 @@ function verifyQuotes(findings, target, rep) {
 function main(argv) {
   const args = argv.slice(2);
   if (!args.length || args.includes('-h') || args.includes('--help')) {
-    console.log('usage: node check-findings.cjs <findings.json> [--ledger <ledger.json>] [--target <repo>]');
+    console.log([
+      'usage: node check-findings.cjs <findings.json> [--ledger <ledger.json>] [--target <repo>]',
+      '  --ledger <ledger.json>  cross-check fingerprints against the ledger (run.json next to it decides',
+      '                          whether unlinked ledger candidates are fatal)',
+      '  --target <repo>         verify every trace/evidence quote in the target checkout: after whitespace',
+      '                          normalisation it must be >= 10 characters and appear within 2 lines of',
+      '                          `line`, or equal the whole text of one line within 2 lines',
+      'Confirmed records need execution.proof: "local" (>= 1 execution.evidence_files) or "static"',
+      '(trace of >= 2 steps from entrypoint to sink).',
+    ].join('\n'));
     return args.length ? 0 : 2;
   }
   const rep = new Reporter();
@@ -121,7 +142,7 @@ function main(argv) {
   if (li !== -1) {
     if (!args[li + 1]) rep.err('args', '--ledger needs a path');
     else {
-      const ledger = loadJson(args[li + 1], rep);
+      const ledger = loadJson(args[li + 1], rep, LEDGER_LIMITS);
       const runPath = path.join(path.dirname(path.resolve(args[li + 1])), 'run.json');
       const run = fs.existsSync(runPath) ? loadJson(runPath, rep) : undefined;
       if (ledger !== undefined && data !== undefined) crossCheckLedger(findings, ledger, rep, isObj(run) ? run.status : undefined);
@@ -133,7 +154,7 @@ function main(argv) {
     else if (data !== undefined) verifyQuotes(findings, args[ti + 1], rep);
   }
   const counts = { confirmed: 0, needs_validation: 0, rejected: 0 };
-  for (const r of findings) if (isObj(r) && r.verdict in counts) counts[r.verdict]++;
+  for (const r of findings) if (isObj(r) && hasOwn(counts, r.verdict)) counts[r.verdict]++;
   return rep.finish('findings', `${counts.confirmed} confirmed, ${counts.needs_validation} needs_validation, ${counts.rejected} rejected`);
 }
 

@@ -1,12 +1,16 @@
 {
   "name": "boring-security",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Evidence-first security audit skill and slash commands for coding agents. Zero runtime dependencies.",
   "license": "MIT",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "test": "node --test skills/boring-security/scripts/test/validators.test.cjs skills/boring-security/scripts/test/detector.test.cjs skills/boring-security/scripts/test/score.test.cjs skills/boring-security/scripts/test/run-state.test.cjs",
-    "detect": "node skills/boring-security/scripts/detect.cjs"
+    "test": "node --test skills/boring-security/scripts/test/validators.test.cjs skills/boring-security/scripts/test/detector.test.cjs skills/boring-security/scripts/test/score.test.cjs skills/boring-security/scripts/test/run-state.test.cjs skills/boring-security/scripts/test/brief.test.cjs skills/boring-security/scripts/test/inventory.test.cjs skills/boring-security/scripts/test/sarif.test.cjs skills/boring-security/scripts/test/sandbox-probe.test.cjs hooks/test/bsec-pretool.test.cjs hooks/test/secret-guard.test.cjs bench/test/bench.test.cjs tests/install.test.cjs skills/boring-security/scripts/test/cross-repo.test.cjs skills/boring-security/scripts/test/orchestrate.test.cjs",
+    "detect": "node skills/boring-security/scripts/detect.cjs",
+    "bench": "node bench/detector-bench.cjs",
+    "inventory": "node skills/boring-security/scripts/inventory.cjs"
   }
 }

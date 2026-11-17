@@ -1,123 +1,84 @@
-# Phase 2: Hunting waves and critics
+# Phase 2: Hunting waves, critics, recheck
+
+`RS` = `node "$SKILL_DIR/scripts/run-state.cjs"`. Agent types and models: `references/audit-run.md` §Agents. `carried` units are already reviewed and are not assigned.
 
 ## 2.1 Assign
 
-Give `planned` units to Hunters. One Hunter may take closely related units in one subsystem; don't bundle unrelated boundaries. A unit the budget can't reach becomes `deferred`, never silently dropped.
-
-Priority is stored as a number in `notes.priority` (1 = first), with the reason in `notes.priority_why`:
-1. Unauthenticated or lowest-trust surfaces.
+Give `planned` units to Hunters in priority order. Priority is a number in the seed's `notes.priority` (1 = first), with the reason in `notes.priority_why`:
+1. Unauthenticated or lowest-trust surfaces (cross-repo interface units: 1 for high edges, 2 for medium).
 2. Boundaries guarding credentials, cross-tenant data, code execution, release/signing, money.
 3. Prior gaps, revalidations, changed source.
 4. Classes that historically pay off for this kind of target.
 5. Ties: lexical `id`.
 
-Take units from `run-state.cjs next`, then `run-state.cjs assign <run> <fresh-agent-id> <unit ids…>`. It marks them `in_progress`, creates the agent's directories, and refuses reused agent ids.
-
-## 2.2 Hunter brief, in this order
-
-Items 1-5 are the **shared prefix**: byte-identical for every Hunter in the run, so the prompt cache serves them and each Hunter pays full price only for its own part. Never interleave per-hunter text into it.
-
-1. RULES block (`SKILL.md §2`).
-2. "You find source-grounded security invariant failures in the units given at the end of this brief."
-3. `architecture.md`.
-4. **Method** and **Gate** below.
-5. The **Result contract** below, and the `confirmed` and `needs_validation` branches of `schema/findings.schema.json`.
-6. The **text** of each selected block: the core class, plus each pack's Discipline, chosen classes, Moves and Gate. Order blocks by pack, so Hunters on the same pack share a longer prefix.
-7. Assigned units: ids, labels, start paths, `class_block`, `pack_blocks`, `skipped_blocks` with reasons.
-8. Detector hits from `detector.json` under the units' start paths, labelled "leads to verify, not findings".
-9. Exclusions: carried prior confirmations (`fingerprint`, `title`, `root_cause` only) and peer-owned unit ids.
-10. Agent id, scratch path, promotion allowlist with byte caps.
-
-### Method
-
-```text
-METHOD
-Read deep. Follow each input through parsing → identity → authorization → normalization → state →
-derived copies → final sink. Read the siblings that reach the same effect: legacy, batch, bulk,
-retry, cancel, migration, error and fallback paths. Compare sibling controls for equivalence, not
-presence. Compare what component A guarantees with what component B assumes.
-
-One invariant at a time:
-  1. Lower-trust principal and its starting capability.
-  2. The value / action / transition / resource selector it controls.
-  3. The control that should reject, bind, scope, limit or revoke it.
-  4. The exact path after that decision.
-  5. The smallest affected dummy record, wrong return, integrity or local shared-resource effect.
-  6. The source change and regression test that would enforce the invariant.
-
-Follow only paths that reach your boundary or that it relies on. Stop when the invariant is settled
-either way; record covered / candidate / blocked, or report a new boundary under "uncovered".
-
-Try the sad paths the interface accepts: missing, empty, zero, negative, max, over-max, duplicate,
-mixed encoding/case/unicode, stale, revoked, reordered, concurrent, half-migrated, dependency-failed,
-rolled-back. Check canonicalization and units at every parser/policy hand-off. In a chain, each step
-is a prerequisite you must establish; an unproven step is a blocker.
-
-When a high/critical candidate shows a reusable root cause, search your units for lexical,
-structural and logical variants. One root cause = one candidate; prove each variant's conditions.
-Variants outside your units go to "uncovered".
-
-Use the narrowest local check that settles it: an existing unit test, a tiny harness, a dummy-tenant
-call, a small malformed fixture, a deterministic race schedule, a locally rendered policy.
-Before relying on a framework or library default, confirm the version actually pinned in the repo.
+```bash
+RS next "$RUN_DIR" --batch                       # one line of unit ids per assignment group, priority order
+RS assign "$RUN_DIR" hunter-7 <the ids of one line, before its "#">   # in_progress; prints "use agent bsec-hunter-lite" for a lite assignment
+RS brief "$RUN_DIR" hunter-7 --role hunter [--exclude-file carried.json] [--note-file sandbox.txt]
 ```
 
-### Gate
+- A batch shares start paths, one subsystem and one tier (at most 8 units, ~400 KB of source; `--max-units`, `--max-bytes`). Don't bundle unrelated boundaries by hand; `RS next "$RUN_DIR" --n 20` lists single units if you need to.
+- **Tier.** In the `standard` profile after `RS tier`, a batch of standard-tier units is a `lite` assignment: launch `boring-security:bsec-hunter-lite`. Add `--strong` to `assign` to give it to a strong hunter instead (always in a sandboxed run). Every other assignment is strong: `bsec-hunter`, or `bsec-hunter-sandbox` in a sandboxed run. Code records the tier but cannot check which model you launched.
+- `--exclude-file` is a JSON array of carried prior confirmations (`fingerprint`, `title`, `root_cause` only).
+- **Sandboxed runs:** put the exact sandbox wrapper command and the promotion allowlist (relative names, byte caps) in a note file and pass `--note-file`.
+- A unit the budget can't reach: `RS set-status "$RUN_DIR" <ids…> --to deferred --reason budget_reserve`, never silently dropped.
 
-```text
-GATE
-1. A candidate needs a complete repo-relative trace and evidence for the root cause, including the
-   strongest visible control on the path. Every trace/evidence entry carries a verbatim `quote` of
-   the cited line; validation rejects quotes that aren't in the source.
-2. A proposed "confirmed" also needs a bounded observed result, real impact across a named boundary,
-   complete conditions, and no visible layer that prevents it.
-3. An unverified critical claim is needs_validation, never a downgraded "confirmed low".
-4. A missing best practice with no affected principal/resource is a hardening note. Something source
-   disproves is dropped, not needs_validation.
-5. One fingerprint per root cause, identical in every state: ^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$, no
-   line numbers, wave, agent, severity or verdict. Form: <class>:<path-of-root-cause>:<symbol>,
-   e.g. idor:src/api/orders.ts:getOrder
-6. Nothing survives → empty candidates array. That is a good result.
+## 2.2 The Hunter brief
+
+`brief` assembles it from files; never retype or edit it. Shared prefix (identical for every Hunter in the run, so the prompt cache serves it): RULES, the engagement statement for this run's trust mode, `briefs/hunter.md` (task, METHOD, GATE, result contract, ledger state table, anchor and proof rules), `architecture.md`, the `confirmed` and `needs_validation` schema branches. Per-agent part: your note (if any), the text of every block its units select (core class, pack Discipline, classes, Moves, Gate), the units themselves, detector hits under their start paths ("leads to verify, not findings"), exclusions and peer-owned unit ids, and its own scratch/out paths. Everything from the target is fenced as untrusted data.
+
+Launch a wave's Hunters together with their brief paths. Each writes `agents/<id>/out/result.json` and replies with one line.
+
+## 2.3 Consolidation
+
+```bash
+RS ingest "$RUN_DIR" hunter-7          # reads agents/hunter-7/out/result.json
 ```
 
-### Result contract
+`ingest` stores the raw result first, then for each assigned unit checks ownership, checks, promoted evidence, anchors and paths against the target, and the ledger state rules. Valid units are applied (with `notes.covered_tier` and the cited files' hashes in `hashes.json`); invalid or missing ones return to `planned` (the output lists why). Valid candidates go to `candidates/` (a known fingerprint adds the finder), `uncovered` entries to `queue/uncovered.jsonl`, hardening notes to the units' `notes.hardening`. Don't read the result file into your own context; the command's output is the summary.
 
-```json
-{
-  "units": [{"id": "...", "disposition": "covered|candidate|blocked", "paths": ["..."],
-             "checks": [{"by": "<agent-id>", "paths": ["..."], "invariant": "...", "method": "source|local", "result": "...", "evidence": null}],
-             "fingerprints": [], "open": []}],
-  "candidates": [{"proposed": "confirmed|needs_validation", "...": "that schema branch's fields except verdict"}],
-  "hardening": ["concrete non-finding note with path"],
-  "uncovered": [{"surface": "...", "boundary": "...", "subsystem": "...", "class": "...", "start_paths": ["..."], "why": "..."}]
-}
+In a sandboxed run, promote the files a Hunter's `local` checks name (`references/evidence-promotion.md`) before you run `ingest`; a check whose evidence file is missing returns its unit to `planned`.
+
+Turn reported boundaries into units for the next wave:
+
+```bash
+RS add-units "$RUN_DIR" --from-queue    # unconvertible lines stay in the queue and are listed
 ```
 
-Every assigned id appears exactly once, and dispositions follow the ledger state table. A confirmed candidate's `execution` describes only the check actually done; `observed_result` is real output.
+Fingerprint duplicates collapse automatically. Candidates that share a root cause under different fingerprints are merged at Phase 3: the weaker one's Skeptic gets a note naming the fingerprint it duplicates and rejects it with that reason. One root cause reachable many ways = one candidate with the strongest complete trace. Independent missing controls = separate fingerprints.
 
-## 2.3 Lead consolidation
+## 2.4 Coverage critic (fresh agent after every wave)
 
-Save the Hunter's reply to a file and run `run-state.cjs ingest <run> <agent-id> <file>`. Don't read the reply into your own context beyond its summary line. The script:
-- stores the raw result;
-- checks each unit (assigned to this agent, valid checks, promoted evidence, ledger state rules);
-- applies valid units, and returns invalid or missing ones to `planned`;
-- writes candidates to `candidates/`, `uncovered` entries to `queue/uncovered.jsonl` and hardening notes to `notes.hardening`.
-
-Fingerprint duplicates collapse automatically. You still merge candidates that share a root cause under different fingerprints. One root cause reachable many ways = one candidate with the strongest complete trace. Independent missing controls = separate fingerprints. `queue/uncovered.jsonl` entries become new units for the next wave.
-
-## 2.4 Coverage critic (fresh Scout after every wave)
-
-Brief: RULES + `architecture.md` + full ledger + candidate fingerprints and states + prior-gap summary. Task: find unmapped entry points, unchecked parallel paths, missing lifecycle modes, selected pack classes with no unit, unjustified skips, units closed without real paths/checks, high-confidence detector hits no unit's paths include, and prior leads nobody owns. It proposes **coverage**, not findings:
-
-```json
-{"missing_units": [{"surface": "...", "boundary": "...", "subsystem": "...", "class": "...", "start_paths": ["..."],
-                    "pack_blocks": ["..."], "skipped_blocks": [{"block": "...", "why": "..."}], "why": "source-backed gap"}],
- "reopen_ids": ["..."], "resolved_prior_leads": ["fingerprint"], "stop": false}
+```bash
+RS brief "$RUN_DIR" critic-3 --role critic      # launch as boring-security:bsec-critic
+RS critic "$RUN_DIR" critic-3                   # stores the reply with the current coverage hash
 ```
 
-Lead: reject out-of-scope or unsafe proposals (scoped runs record them `out_of_scope`). Derive ids, dedupe, and fail on collisions. For each valid `reopen_id`, archive into `history` per Phase 1. For each `resolved_prior_leads` entry, record the critic's reason on its unit.
+The critic brief carries `architecture.md`, a compact ledger view, candidate fingerprints and states, inventory gaps and high-confidence detector hits no unit's paths include. The critic proposes coverage, not findings: missing units, reopen ids, resolved prior leads, `stop`.
+
+Lead, after every critic:
+- `RS add-units "$RUN_DIR" --from-critic critic-3` adds every convertible proposal as `planned`. To accept only some, write the accepted ones as seeds and use `RS add-units "$RUN_DIR" seeds.json` instead. Proposals outside a scoped run's scope: add them, then `RS set-status … --to out_of_scope --reason "<scope>"`.
+- For each reopen id the `critic` command prints, run `RS reopen "$RUN_DIR" <unit-id> --reason "..."`: it archives the attempt and plans the unit for a fresh owner.
+- `resolved_prior_leads` stay in `critics/<seq>.json`; cite them in the report.
 
 Termination:
-- `quick`: one wave → one critic → additions and reopens become `deferred` (`quick_profile`). Stop.
-- `standard`/`deep`: repeat wave → critic until it finds nothing and no `planned` units remain, then run a **separate** final-clean critic. Coverage is clean only if that one also finds nothing; otherwise queue its work and loop.
-- Early stop: untouched units become `deferred` with the reason. An agent cap is never evidence of coverage.
+- `quick`: one wave → one critic. Add its proposals, then park them: `RS set-status "$RUN_DIR" <new ids> --to deferred --reason quick_profile`. Stop.
+- `standard`/`deep`: repeat wave → critic until no `planned` units remain and a critic is clean, then run a **separate** final-clean critic with a fresh id. Coverage is clean when `RS status` says the last two critics are clean, distinct, at the current coverage. Any new, reopened or re-statused unit changes the coverage hash, so both clean critics must come after the last change.
+- Early stop: `RS set-status "$RUN_DIR" <untouched ids> --to deferred --reason stopped_early`, then `RS incomplete "$RUN_DIR" stopped_early`. An agent cap is never evidence of coverage.
+
+## 2.5 Recheck sample
+
+Required in `deep` and in any run where lite hunters covered units; in `standard` otherwise, when the budget allows. Draw it once hunting has finished (no `planned` or `in_progress` units):
+
+```bash
+RS sample-recheck "$RUN_DIR"                                         # deterministic: 10 % (min 3) of covered + carried units, plus 20 % (min 5) of lite-covered ones
+RS brief "$RUN_DIR" recheck-1 --role recheck --units <id> <id> ...   # launch as boring-security:bsec-hunter
+RS recheck-result "$RUN_DIR" recheck-1
+```
+
+A recheck agent never owned or checked the units it gets and isn't shown the original conclusion; it re-derives each invariant and agrees only if it can quote the enforcing control. Every sampled unit needs an answer.
+- For each disagreement, `recheck-result` prints the `reopen` command: run it, hunt the unit again with a fresh Hunter, and run the critics again (the coverage hash changed).
+- If the lite stratum fails (two or more disagreements and over 10 % of it), `RS reopen "$RUN_DIR" --lite-tier --reason "..."` sends every lite-covered unit back to strong hunters.
+- If units were added or reopened after the sample was drawn, `RS status` asks for `RS sample-recheck "$RUN_DIR" --redraw`; answers already recorded at the same wave are kept.
+
+The report states the sample size and the disagreements (per stratum) as a miss-rate estimate (disagreements ÷ sampled), never as zero misses.

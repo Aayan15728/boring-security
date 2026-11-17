@@ -1,9 +1,9 @@
 ---
 description: Database integrity and concurrency audit - constraints, races, lost updates, idempotency, transactions, money types, timestamps, migration drift; races proven on a local DB, never on production
-argument-hint: "[target] [--profile quick|standard|deep] [--out <run dir>] [--budget <agents>]"
+argument-hint: "[target] [--profile quick|standard|deep] [--out <run dir>] [--budget <agents>] [--untrusted] [--advisories]"
 ---
 
-Use the `boring-security` skill in **Audit mode** as a scoped run on `packs/data-integrity.md` (profile default `deep`). Other arguments and reply as in `/full-audit`: `$ARGUMENTS`
+Use the `boring-security` skill in **Audit mode** as a scoped run on `packs/data-integrity.md` (profile from `--profile`, otherwise `standard` per `references/audit-run.md` §Profiles). Other arguments and reply as in `/full-audit`: `$ARGUMENTS`
 
 - Also select `data-lifecycle` (tenant isolation, deletion, restore) and `core-classes.md#Business logic`.
 - Seed one unit per invariant × writer path, not per table. Recon must produce the invariant table and constraint inventory described in the pack's Moves.

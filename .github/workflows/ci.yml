@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Read-only token, no secrets, no pull_request_target.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['18', '22']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Always npm test, never a bare `node --test`: discovery would pick up the corpus file
+      # bench/corpus/clean-api/test/notes.test.js, which is benchmark data, not a test.
+      - name: Unit and validator tests
+        run: npm test
+
+      # Regression gate: fails when the detector's recall on bench/corpus drops below 90 %
+      # (corpus numbers measure regressions, not real-world detection rate).
+      - name: Detector benchmark
+        run: node bench/detector-bench.cjs --min-recall 0.9
+
+      - name: Installer dry run (copy mode, temporary destination)
+        shell: bash
+        run: node install.cjs --dry-run --copy --dest "$RUNNER_TEMP/claude"

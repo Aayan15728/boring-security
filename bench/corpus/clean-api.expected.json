@@ -1,0 +1,14 @@
+{
+  "corpus": "clean-api",
+  "description": "Express + Postgres notes API written to be correct. It has no planted vulnerabilities; every item is a scary-looking but safe pattern. Any confirmed finding that does not sit on a decoy is an 'unmatched' finding to review by hand (it may be a real, unplanned bug).",
+  "items": [
+    {"id": "ca-d1", "kind": "decoy", "file": "src/routes/notes.js", "lines": [21, 21], "anchor": "ORDER BY ${orderBy}", "title": "Template literal with an interpolated ORDER BY column inside db.query", "why_safe": "orderBy comes from a SORT_COLUMNS allowlist lookup with a constant fallback; every value is bound with $1/$2."},
+    {"id": "ca-d2", "kind": "decoy", "file": "src/routes/files.js", "lines": [11, 16], "anchor": "path.resolve(userDir, req.params.name)", "title": "File path built from req.params", "why_safe": "The resolved path must stay inside the caller's own upload directory (startsWith(userDir + path.sep)) before it is used."},
+    {"id": "ca-d3", "kind": "decoy", "file": "src/routes/files.js", "lines": [21, 21], "anchor": "createHash('md5')", "title": "MD5 hash", "why_safe": "Used only to derive a cache validator (ETag) from size and mtime; no security property depends on it."},
+    {"id": "ca-d4", "kind": "decoy", "file": "src/db.js", "lines": [15, 15], "anchor": "Math.random()", "title": "Math.random() in connection retry", "why_safe": "Only adds jitter to a retry delay; not used for tokens, ids or secrets."},
+    {"id": "ca-d5", "kind": "decoy", "file": "src/routes/auth.js", "lines": [57, 58], "anchor": "res.redirect(target)", "title": "Redirect derived from req.query.next", "why_safe": "target is passed through safeRedirect, which only allows same-site absolute paths and rejects //host, /\\host and scheme URLs."},
+    {"id": "ca-d6", "kind": "decoy", "file": "test/notes.test.js", "lines": [6, 7], "anchor": "const secret =", "locations": [{"file": "test/notes.test.js", "lines": [30, 30], "anchor": "another-key-"}], "title": "Secret literal in a test file", "why_safe": "A throwaway key used only by the unit test process; production reads JWT_SECRET from the environment and refuses to start without it."},
+    {"id": "ca-d7", "kind": "decoy", "file": "src/app.js", "lines": [16, 17], "anchor": "app.use('/webhooks'", "title": "Webhook route mounted without requireAuth", "why_safe": "Callers are not users; routes/webhooks.js verifies an HMAC-SHA256 signature over the raw body with timingSafeEqual and de-duplicates by event id."},
+    {"id": "ca-d8", "kind": "decoy", "file": ".env.example", "lines": [2, 2], "anchor": "DATABASE_URL=", "title": "Database URL with a password in an env file", "why_safe": "Placeholder value in an example file that is meant to be copied; the real URL comes from the environment."}
+  ]
+}

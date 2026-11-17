@@ -12,10 +12,12 @@ HTTP apps and APIs, reverse proxies/CDNs/gateways, custom HTTP parsing, cookies 
 - For every credential, find the signature/secret verification and every binding its role requires:
   issuer, audience, origin/RP, client, session, principal, resource, assurance level, expiry, one-time
   state. A validly signed token for another service, tenant or purpose is an invalid token here.
-- Host, Forwarded/X-Forwarded-*, Origin, Referer, redirect targets, callback state and request-derived
-  URLs are trust decisions. Trace each one to the identity or response it affects.
-- A missing header, cookie attribute, MFA prompt or rate limit is not a finding alone. Require an
-  accepted invalid request, cross-principal effect, assurance downgrade or credential disclosure.
+- Anything the client can set that the server uses to decide trust (Host, Forwarded/X-Forwarded-*,
+  Origin, Referer, redirect and callback values, URLs built from the request) gets traced to the
+  identity or response it changes.
+- An absent rate limit, MFA step, header or cookie flag proves nothing by itself. The finding is the
+  server accepting what it should refuse: an invalid request, another principal's data, a lower
+  assurance level, or a leaked credential.
 - Session, login, MFA, recovery and linking are state machines. Check transitions the UI never makes.
 ```
 
@@ -49,7 +51,7 @@ Over-broad `Domain`/`Path` shared with a less-trusted subdomain (cookie tossing)
 
 ## Federated identity
 
-These classes are spec-conformance checks. Paste the matching section of `references/identity-specs.md` into the Hunter brief verbatim; its rows are the checklist.
+These classes are spec-conformance checks. Add the matching section of `references/identity-specs.md` to the unit's `pack_blocks` (e.g. `references/identity-specs.md#JWT and JWS`) so the generated brief carries it; its rows are the checklist.
 
 **JWT verification and claim binding**
 Rows J1-J9 (`identity-specs.md#JWT and JWS`) on every path that consumes a token.
@@ -93,8 +95,8 @@ Expired, revoked or missing certs fall back to weaker or no authentication.
 
 ## Moves
 
-- Walk issue → store → transmit → consume → refresh → revoke for every credential and challenge, on normal, error, retry, legacy and account-switch paths.
-- List every door to the same identity and every route to the same sensitive operation. The effective policy is the weakest parallel path.
+- Follow each credential and challenge through its whole life (created, stored, sent, used, renewed, revoked) on the normal path and on error, retry, legacy and account-switch paths.
+- Find all the ways in to one identity and all the paths to one sensitive action; the real policy is whatever the least protected of them enforces.
 - Put parser, proxy, router, cache and app normalization side by side; feed the same bounded fixture to each.
 - Diff middleware stacks between sibling routes.
 

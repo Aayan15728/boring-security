@@ -1,10 +1,19 @@
 {
   "name": "boring-security",
-  "version": "0.3.0",
-  "description": "Evidence-first security auditing for coding agents: recon, coverage-ledger hunting, adversarial validation, and verified reports. Slash commands for deep, full, quick, diff, mobile, web, AI, cloud, and supply-chain audits. Concepts adapted from Cloudflare's security-audit skill (MIT).",
+  "version": "0.4.0",
+  "description": "Evidence-first security auditing for coding agents: recon, coverage-ledger hunting, adversarial validation, completion-gated verified reports. Restricted subagents and enforcement hooks. Slash commands for full, quick, diff, web, mobile, AI, cloud, database and supply-chain audits, pre-deploy checks and fixes. Concepts adapted from Cloudflare's security-audit skill (MIT).",
   "author": {
     "name": "boring-security contributors"
   },
   "license": "MIT",
-  "keywords": ["security", "audit", "pentest", "code-review", "mobile", "appsec"]
+  "keywords": [
+    "security",
+    "audit",
+    "pentest",
+    "code-review",
+    "appsec",
+    "mobile",
+    "supabase",
+    "sarif"
+  ]
 }

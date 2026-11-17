@@ -6,7 +6,7 @@ argument-hint: "<description of the issue, or path to a finding JSON>"
 Use the `boring-security` skill. Candidate: `$ARGUMENTS`
 
 1. Turn the input into a candidate (principal, controlled input, intended control, boundary, affected resource, claimed result, source trace). Find the code yourself if only a description was given.
-2. Run one fresh Skeptic per `phases/3-skeptic.md`. Don't pre-judge the candidate in its brief.
-3. Write its record as a one-element array to a temp file and validate it with `scripts/check-findings.cjs`.
+2. Run one fresh Skeptic per `phases/3-skeptic.md` §Outside a run directory. Don't pre-judge the candidate in its brief.
+3. Write its record as a one-element array to a temp file and validate it with `scripts/check-findings.cjs <file> --target <repo>`.
 
 Reply with the decision and the record as readable markdown; for `confirmed`, add the smallest fix and a regression test.

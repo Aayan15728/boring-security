@@ -56,7 +56,7 @@ Legit features used for something they weren't meant for:
 Things that are fine alone and broken together:
 - **Multi-step**: map what a low-privilege actor can read, write, invoke and keep; connect only *proven* outputs to later trust decisions.
 - **A→B guarantee mismatch**: what A validates vs what B assumes — truncation, coercion, normalization, tenant scope, plugin access.
-- **Second-order use**: a name becomes a JSON path, a slug becomes a file path, escaped text gets rendered raw, a string becomes a URL/regex/template/policy.
+- **Second-order use**: a value stored safely in one role is reused in another: a display name used as a JSON path or file path, escaped text later rendered raw, a plain string later treated as a URL, regex, template or policy.
 - **Capability growth**: tokens, API keys, OAuth grants, plugin/MCP/agent capabilities that widen after refresh, delegation, caching, role change or composition. Name the exact operation the result shouldn't have.
 - **Timing windows**: setup, migration, soft-delete, revoke vs cache expiry, check vs use, validate vs consume.
 - **Rollback/recovery**: undelete, restore, revert, cancel — do they re-apply *current* ownership and validation?
@@ -83,7 +83,7 @@ Literal, exhaustive, unglamorous. Check every item and report each result:
 - Unprotected `/debug`, `/admin`, `/test`, `/status`, `/health`, `/metrics`, `/env`, `/.env`, `/config`, `/actuator`, `/graphql` introspection, Swagger UIs.
 - Committed `.env*`, `credentials.json`, `*.pem`, `*.key`, `*.p12`, `*.jks`, `google-services.json` with server keys, `GoogleService-Info.plist`.
 - `.gitignore` coverage for secrets, uploads, local config.
-- Unpinned deps / lockfile drift / known-vulnerable versions visible in lockfiles (offline: compare against what you know; don't fetch advisories).
+- Unpinned deps / lockfile drift / known-vulnerable versions visible in lockfiles (offline by default: what you know is stale, so call these leads; a registry or OSV lookup only via the `--advisories` opt-in in `references/advisories.md`).
 - `eval`, `exec`, `Function()`, `child_process`, `vm.run*`, dynamic `import()`/`require()`, `pickle.loads`, `yaml.load` (unsafe), `Runtime.exec` with dynamic input.
 - CORS `*` or reflected origin with credentials.
 - Cookies missing `HttpOnly`/`Secure`/`SameSite` — *only if* they carry something sensitive and JS doesn't need them.

@@ -1,0 +1,10 @@
+{
+  "id": "case-template",
+  "repo": "https://github.com/OWNER/REPO",
+  "pre_patch_commit": "0000000000000000000000000000000000000000",
+  "fix_commit": "0000000000000000000000000000000000000000",
+  "cve": "CVE-0000-00000",
+  "cwe": ["CWE-000"],
+  "expected": { "file": "path/in/repo.ext", "lines": [1, 1], "title": "one-line description of the bug" },
+  "notes": "Template only. Copy to <id>.json, fill in real values, fetch the repo by hand at pre_patch_commit."
+}

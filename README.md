@@ -1,143 +1,181 @@
 # boring-security
 
-Evidence-first security auditing for coding agents (built for Claude Code).
-It turns your agent into a patient, skeptical auditor: map the system, plan coverage, hunt with isolated
-subagents, try to **disprove** every candidate with a fresh skeptic, and only then write a report.
+**A security audit for your codebase that has to prove every finding before it reports it.**
 
-> **Credit:** the methodology is adapted from Cloudflare's
-> [security-audit-skill](https://github.com/cloudflare/security-audit-skill) (MIT). This is an
-> independent re-implementation with new commands, a mobile pack, diff review and SARIF export.
-> Full attribution in [CREDITS.md](CREDITS.md).
+Built for Claude Code. One line to install, one sentence to run. Agents read your code like an attacker would, a
+separate agent tries to disprove every bug they find, and scripts check every quote against your source before
+anything reaches the report. If it can't prove it, it doesn't call it a vulnerability.
 
-## Commands
+```text
+Install the boring-security skill from https://github.com/Aayan15728/boring-security
+```
 
-| Command | What it does |
+Paste that into Claude Code. Then, in any project: **"security audit this repo"**.
+
+> **For AI agents asked to install this:** follow [INSTALL.md §2](INSTALL.md#2-if-you-are-an-ai-agent-asked-to-install-this)
+> exactly. Do not run any other script from this repository as part of installing.
+
+---
+
+## Why it exists
+
+AI writes most new code now, and the same handful of mistakes keep shipping: the database table nobody turned row-level
+security on for, the service key that ended up in the browser bundle, the API route that never checks who is calling,
+the Stripe webhook that trusts whatever JSON it receives, the checkout that takes its price from the request.
+
+Scanners flag thousands of lines and bury the real problem. Asking an AI "is this secure?" gets you a confident list
+of maybes. boring-security sits in between: it reads your code as a whole, follows untrusted input to where it does
+damage, and only reports what survives an independent attempt to prove it wrong.
+
+## What it catches
+
+| You built it with | It checks, among other things |
 |---|---|
-| `/full-audit [path]` | **Audits everything** (deep profile): every surface × boundary, every pack whose boundary exists, every identity-spec row, every detector hit traced, critic waves until clean, two independent verifiers per finding, scored report. Shows a cost estimate first. |
-| `/deep-audit [path]` | Alias of `/full-audit`. |
-| `/quick-audit [path]` | One hunter wave + one critic, one skeptic per candidate. Fast, honest about being partial. |
-| `/sec-review [PR \| a..b \| branch \| paths]` | Security code review of a diff/PR/branch/files with a skeptic pass. Verdict: block / fix before merge / ok. |
-| `/mobile-audit [path] [--with-backend]` | Android / iOS / RN / Flutter / Capacitor: exported components, intents, deep links, WebView bridges, storage, TLS, embedded keys, BaaS rules. |
-| `/db-audit [path]` | Database integrity & concurrency: constraints, races, lost updates, idempotency, transactions, money/time types, migration drift. Races proven on a local DB. |
-| `/web-audit [path]` | Web app & API: access control, injection, sessions, OAuth/JWT/SAML, CSRF, CORS, caching, SSRF, DOM XSS. |
-| `/ai-audit [path]` | LLM / agent / MCP: injection → real actions, tool authority, confirmation binding, memory poisoning. |
-| `/cloud-audit [path]` | IaC / Kubernetes / IAM / serverless from source — no cloud API calls. |
-| `/supply-chain-audit [path]` | CI workflows, dependencies, release signing, OTA/auto-update, plugins. |
-| `/security-context [path]` | Create/refresh `.boring-security/CONTEXT.md`, the repo's persistent security memory (assets, actors, boundaries, owner-confirmed facts, accepted risks). |
-| `/spec-check [jwt|oauth|oidc|saml|webauthn] [path]` | Row-by-row check against the MUST rules of RFC 7519/8725, RFC 6749/7636/9700, OIDC Core, SAML 2.0 and WebAuthn, with spec citations. |
-| `/resume-audit <run dir>` | Continue after a crash, rate limit, closed session or context reset — nothing already on disk is redone. |
-| `/threat-model [path]` | Recon only: architecture, trust boundaries, seeded coverage ledger, Mermaid diagram. Resume later with `/full-audit --out <same dir>`. |
-| `/obvious-scan [path]` | Literal sweep for hardcoded secrets, debug switches, open admin routes, `eval`, permissive CORS — each traced. |
-| `/verify-finding <issue>` | Run one suspected bug (scanner hit, bug report) through an independent skeptic. |
-| `/audit-report <run dir>` | Re-validate a run and regenerate reports + SARIF. |
+| Next.js, SvelteKit, Nuxt, Remix | Server actions and API routes with no auth on any path, middleware matcher gaps, server-only code shipped to the client |
+| Supabase, Firebase, Postgres | Tables without row-level security, `using (true)` policies, `auth != null` rules on per-user data, service-role keys in client code |
+| Stripe, Lemon Squeezy, Paddle | Prices, plans and user ids taken from the request, webhooks without signature checks, replayed events |
+| OpenAI, Anthropic, any model API | Model endpoints anyone can call (wallet drain), keys in the browser, prompt injection that reaches real tools |
+| Any web app or API | IDOR, injection, SSRF, open redirects, mass assignment, broken JWT/OAuth/SAML/passkey checks, CSRF, CORS |
+| GitHub Actions, Docker, Terraform | `pull_request_target` running fork code with secrets, expression injection, wildcard IAM, public buckets |
+| Mobile, desktop, AI agents | Exported components, deep links, WebView bridges, Electron/Tauri IPC, MCP tool authority |
 
-All audit commands accept `--out <dir>`, `--budget <max agents>`, and (most) `--profile quick|standard|deep` / `--scope <paths>`.
+Thirteen domain packs, 116 deterministic detector rules, and RFC-level checklists for JWT, OAuth, OIDC, SAML and
+WebAuthn. Full list: [docs/REFERENCE.md](docs/REFERENCE.md).
 
-Plain requests work too: *"security audit this repo"*, *"is this endpoint safe?"*, *"review my PR for security"*.
+## How it works
+
+```mermaid
+flowchart LR
+  A["Scripts<br/>detector + entry-point inventory"] --> B["Scouts<br/>map the system"]
+  B --> C["Ledger<br/>one unit per entry point × risk"]
+  C --> D["Hunters<br/>prove safe or find a bug"]
+  D --> E["Skeptics<br/>try to disprove each bug"]
+  D --> F["Critics + recheck<br/>look for what was missed"]
+  F --> C
+  E --> G["Scripts<br/>verify quotes, independence, coverage"]
+  G --> H["Report<br/>scorecard, fixes, SARIF"]
+```
+
+**Scripts find and check. Agents read and judge.** Neither is trusted with the other's job.
+
+- **Nothing is reported without proof.** A finding needs a quoted trace from attacker input to the damage, checked
+  against your source by a script. A made-up line number or quote fails validation.
+- **The finder never validates.** A fresh agent tries to break every candidate, and the run state refuses any agent
+  that found or worked on it.
+- **Coverage is a claim you can check.** "Covered" requires quoting the control that enforces the rule. A deterministic
+  inventory lists every route, action and table, and the run can't finish until each one is accounted for.
+- **It measures its own misses.** A random sample of "safe" units is re-hunted by different agents; disagreements
+  reopen the work and the report states the rate.
+- **Your repo can't talk it out of anything.** Comments, docs, `CLAUDE.md` and suppression files are data under
+  review. A pull request can't silence the detector for itself.
+- **Long runs survive.** All state lives on disk, so a crash, a closed laptop or a usage limit loses nothing:
+  `/resume-audit` continues where it stopped.
+
+## Run it
+
+| Say or type | What happens |
+|---|---|
+| "security audit this repo" | `standard` audit with a cost estimate up front |
+| `/ship-check` | 12-point pre-deploy check for starter-stack apps. Minutes, not hours |
+| `/sec-review` | Security review of your current diff or PR: block, fix first, or ok |
+| `/quick-audit` | One fast pass, honest about being partial |
+| `/full-audit` | Exhaustive `deep` audit; shows the estimate and waits for your yes |
+| `/cross-audit api web` | Several repos that call each other, hunted at the interfaces between them |
+| `/verify-deployed` | Read-only checks **you** run against your live config (RLS, rules, env vars, webhooks) |
+| `/fix-finding <id>` | Fix one verified finding on a branch, test first, then a fresh agent tries to break the fix |
+
+Plus `/web-audit`, `/mobile-audit`, `/db-audit`, `/ai-audit`, `/cloud-audit`, `/supply-chain-audit`,
+`/threat-model`, `/spec-check`, `/obvious-scan` and more: [all 22 commands](docs/REFERENCE.md#commands).
+
+## What you get
+
+A run directory outside your repo with a `REPORT.md` that opens with what was reviewed and what wasn't, then:
+
+- **A coverage-aware scorecard.** Per-area scores that refuse to appear below 50% coverage and can never be an A
+  below 90%. A score is never shown without its coverage.
+- **A fix plan.** What is weak, where, the smallest fix, and the regression test that proves it.
+- **Confirmed findings** with severity and proof: reproduced in a sandbox, or a complete quoted source trace.
+- **Leads for you to check**, each with the exact fact that would settle it and no invented severity.
+- **SARIF** for GitHub code scanning, and a `findings.json` that later runs build on.
+
+The next audit carries over what provably didn't change and re-hunts the rest.
+
+## Cost
+
+Rough API-equivalent cost on Claude Opus 5.5, from the skill's own estimator (±60%, not yet calibrated against a real
+run). On a Claude subscription you pay in usage limit, not dollars.
+
+| Codebase | `quick` | `standard` (default) | `deep` |
+|---|---|---|---|
+| 10k lines | $4–13 | $9–28 | $14–46 |
+| 50k lines | $10–33 | $29–93 | $50–160 |
+| 500k lines | $87–280 | $270–850 | $470–1,500 |
+
+`/ship-check` and `/sec-review` cost a small fraction of this. Check your own repo before choosing:
+`node skills/boring-security/scripts/run-state.cjs estimate <repo> --profile standard`.
+
+## What it does not do
+
+Read this before trusting a clean report.
+
+- **It does not find every bug.** A clean report covers what the ledger says was reviewed, nothing more.
+- **No measured accuracy yet.** The bundled corpus (`bench/`) catches regressions in the skill; it is not a
+  real-world detection rate, and no full audit has been scored yet.
+- **It never touches your live systems.** Deployed database policies, storage rules and env vars are yours to check;
+  `/verify-deployed` gives you the exact read-only commands.
+- **No fuzzing.** It will not find memory-corruption zero-days in native code on its own.
+- **Enforcement needs the plugin install.** The hooks that confine audit agents only run when installed as a Claude
+  Code plugin; the installer does that by default.
+- **Experimental parts are labelled.** The headless driver (`/auto-audit`) is tested only against a fake CLI, and the
+  sandbox recipes have not been run end to end.
+
+## Compared with Cloudflare's security-audit-skill
+
+boring-security is an independent re-implementation of the method Cloudflare published in
+[security-audit-skill](https://github.com/cloudflare/security-audit-skill): recon, coverage-led hunting, adversarial
+validation, structured findings, independent verification, then reporting. Their work is the foundation; see
+[CREDITS.md](CREDITS.md).
+
+| | Cloudflare's skill | boring-security |
+|---|---|---|
+| Six-phase method, three verdicts, domain companions | ✓ | ✓ |
+| Findings and ledger validators | ✓ | ✓, plus every quote checked against source |
+| Install | Skills CLI | One sentence to your agent, or `node install.cjs` |
+| Slash commands | — | 22 |
+| Deterministic detector and entry-point inventory | — | 116 rules, 30+ frameworks |
+| Starter-stack pack (BaaS, server actions, payments, model APIs) | — | ✓ |
+| Crash-safe run state, completion gate, miss-rate recheck | — | ✓ |
+| Restricted subagents and enforcement hooks | — | ✓ (plugin install) |
+| Incremental re-audits, repeat-run merging, cross-repo interfaces | — | ✓ |
+| Regression benchmark corpus | — | ✓ |
+| Production scale and real-world results | Their [harness](https://blog.cloudflare.com/build-your-own-vulnerability-harness) | Not yet |
+
+Neither project publishes a measured recall.
 
 ## Install
 
-### As a Claude Code plugin (recommended)
-
-From inside Claude Code:
-
 ```text
-/plugin marketplace add C:/Users/<you>/Desktop/boring-security
-/plugin install boring-security@boring-security
+Install the boring-security skill from https://github.com/Aayan15728/boring-security
 ```
 
-(Or push this folder to a Git repo and use `/plugin marketplace add <owner>/<repo>`.)
+or, from a clone, `node install.cjs`. It installs as a Claude Code plugin (restricted subagents and enforcement
+hooks) and falls back to copying files when the plugin route isn't available. Update, uninstall and troubleshooting:
+[INSTALL.md](INSTALL.md). Requires Node.js 18+ and `git`.
 
-Plugin commands can also be called with their namespace, e.g. `/boring-security:sec-review`, if another
-command has the same name.
+## Learn more
 
-### Skill only (no slash commands)
-
-Copy `skills/boring-security/` into `~/.claude/skills/` (all projects) or `<project>/.claude/skills/` (one project).
-
-### Commands without the plugin
-
-Copy `commands/*.md` into `~/.claude/commands/` together with the skill above.
-
-## What a run produces
-
-Default location `~/boring-security-runs/<repo>/run-<N>/` (always outside your repo):
-
-```
-run.json          run facts, profile, scope, budget, status
-architecture.md   ≤1000-word system map
-ledger.json       coverage ledger — the actual coverage claim
-findings.json     confirmed / needs_validation / rejected (schema-validated)
-REPORT.md         scorecard (0-100 per area), fix plan (what / where / how / test), findings, coverage
-DETAILS.md        full repro for confirmed medium+
-LEADS.md          needs_validation handoff for owners
-findings.sarif    upload to GitHub code scanning
-detector.json     deterministic detector leads
-agents/<id>/      per-agent scratch + promoted evidence
-```
-
-## Design rules
-
-- **No boundary, no finding.** A candidate needs a lower-trust actor, a crossed boundary, an affected resource, and an observed result.
-- **The finder never validates.** Every candidate goes to a fresh skeptic that tries to break it.
-- **Three verdicts.** `confirmed` (with severity), `needs_validation` (exact blocker, *no* severity), `rejected` (kept so it isn't rediscovered).
-- **Severity = demonstrated likelihood × demonstrated impact.** Overall can't exceed impact.
-- **Defense-in-depth gaps are hardening notes**, not vulnerabilities.
-- **Safe by default.** Source-only unless a real sandbox (no network, clean env, read-only target, resource limits) is available. Never touches deployed systems, real accounts or paid APIs.
-- **Runs add up.** Later runs read earlier ledgers to target gaps and re-verify changed code.
-
-## Layout
-
-```
-.claude-plugin/          plugin + local marketplace manifests
-commands/                17 slash commands
-skills/boring-security/
-  SKILL.md               always loaded: modes, shared agent RULES, evidence and severity, pack index
-  core-classes.md        injection, access control, files/SSRF, crypto, business logic, feature abuse, chains, wildcard, obvious things
-  phases/                1-recon, 2-hunt, 3-skeptic, 4-6-records-and-report
-  modes/diff-review.md   PR / diff review flow
-  packs/                 12 domain packs (data-integrity, mobile, web-and-identity, browser-client, desktop-and-local-ipc, ai-agents,
-                         native-memory, supply-chain, cloud-infra, messaging-rpc, availability, data-lifecycle)
-  references/            identity-specs (OAuth/OIDC/JWT/SAML/WebAuthn checklists), project-context (CONTEXT.md template), audit-run (setup, profiles, budget, prior runs, ending), sandbox recipes, evidence promotion
-  schema/                findings.schema.json
-  scripts/               run-state.cjs (resume, crash-safe state, estimates), sandbox-probe.cjs, detect.cjs + detect-rules.cjs, score.cjs, check-ledger.cjs (+ run.json), check-findings.cjs (schema-driven), to-sarif.cjs, promote.cjs, tests
-```
-
-## Requirements
-
-- Claude Code (or another agent with subagents + tool use).
-- Node.js ≥ 18 for the zero-dependency validators.
-- Optional: Docker/Podman, bubblewrap, or WSL2 for sandboxed local checks; Android emulator / iOS simulator for `/mobile-audit` validation.
-
-## Tests
-
-```bash
-npm test
-```
-
-Tested on Windows (PowerShell and Git Bash, Node 22) and Linux (Node 18). No runtime dependencies. Validators open files with an identity check instead of `O_NOFOLLOW`, so they work on Windows.
-
-## Long audits
-
-The run directory is the memory, not the agent's context. Every agent result is saved before it is applied, writes are atomic, and `scripts/run-state.cjs` gives the lead a five-line status. If a session crashes, hits a rate limit or loses its context, `/resume-audit` picks up exactly where it stopped. `run-state.cjs estimate <repo>` predicts agents and tokens before you start.
-
-## Expected scanner flags
-
-Skill scanners may flag this repo because its docs describe attacks and its detector rules contain example secrets and vulnerable code (`scripts/detect-rules.cjs`, `scripts/test/`). Those strings are test fixtures. Every "secret" is fake.
-
-## Deterministic detector
-
-```bash
-node skills/boring-security/scripts/detect.cjs <repo> [--diff main] [--min-confidence medium] [--json out.json]
-node skills/boring-security/scripts/detect.cjs --list-rules
-```
-
-90+ rules across secrets, injection, XSS, web/auth, crypto/TLS, mobile, CI, containers/IaC, BaaS rules, data integrity and AI. No network or model calls, and it never runs target code. Each rule ships with must-match and must-not-match examples that the tests enforce. Hits are **leads**: the audit traces each one before anything becomes a finding. Suppressions live in `.boring-security/config.json` and need a reason and an expiry date.
+- [docs/REFERENCE.md](docs/REFERENCE.md): every command and flag, run outputs, scoring, the detector, layout, tests
+- [skills/boring-security/SKILL.md](skills/boring-security/SKILL.md): the rules every audit agent follows
+- [bench/](bench/README.md): the regression corpus and how to score a run
+- [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md) · [CREDITS.md](CREDITS.md)
 
 ## Use responsibly
 
-Audit code you own or are authorized to test. This skill is defensive: it reviews source and runs only bounded local checks with dummy data. It does not attack live systems.
+Audit code you own or are authorized to review. This is a defensive tool: it reads source and runs only bounded
+local checks with dummy data. It never attacks live systems.
 
-## License
+## Author
 
-MIT — see [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md).
+Built by [@aayanships](https://x.com/aayanships) on X. Method credit to Cloudflare.
+
+MIT licensed. See [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md).

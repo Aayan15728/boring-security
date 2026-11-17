@@ -1,0 +1,31 @@
+{
+  "description": "boring-security: confine bsec-* audit subagents (writes to their run scratch/out only, no network or install commands) and warn the model about high-confidence secrets right after it writes a file. Set BORING_SECURITY_GUARD=off to silence the write-time secret guard.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Monitor|WebFetch|WebSearch|Artifact|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/bsec-pretool.cjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/secret-guard.cjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 # Evidence promotion (lead only)
 
-After a sandboxed run, `scratch/` is attacker-shaped: it can hold symlinks to your secrets, FIFOs that hang a reader, hard links, or files that are still changing. Only the lead copies files to `evidence/`, only after every sandboxed process has exited, and only files declared in advance (relative name, per-file byte cap, total cap).
+After a sandboxed run, `scratch/` is attacker-shaped: it can hold symlinks to your secrets, FIFOs that hang a reader, hard links, or files that are still changing. Only the lead copies files to `evidence/`, only after every sandboxed process has exited, and only files declared in advance (relative name, per-file byte cap, total cap). Declare them in the sandboxed agent's prompt next to its brief path, and promote them before `run-state.cjs ingest`, which returns a unit whose `local` check names a missing evidence file to `planned`.
 
 ```bash
 node "$SKILL_DIR/scripts/promote.cjs" <scratch-root> <evidence-root> <relpath> <maxBytes>

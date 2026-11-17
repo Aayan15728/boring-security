@@ -1,5 +1,5 @@
 {
   "detector": {
-    "exclude_paths": ["skills/boring-security/scripts/detect-rules.cjs"]
+    "exclude_paths": ["skills/boring-security/scripts/detect-rules.cjs", "bench/corpus/**"]
   }
 }

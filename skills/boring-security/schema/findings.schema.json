@@ -68,6 +68,13 @@
         }
       }
     },
+    "quote": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "x-visible": true,
+      "description": "Verbatim excerpt of the cited source line(s). check-findings --target requires that, after whitespace normalisation, it is either at least 10 characters long and appears within 2 lines of `line`, or is exactly the whole text of one line within 2 lines of `line` (short lines only; must contain a letter or digit). minLength stays 1 because of that exception; the length rule is enforced in code."
+    },
     "trace": {
       "type": "array",
       "minItems": 1,
@@ -99,11 +106,7 @@
             "minimum": 1
           },
           "quote": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 300,
-            "x-visible": true,
-            "description": "Verbatim excerpt of the cited source line(s); check-findings --target confirms it appears within 2 lines of `line`."
+            "$ref": "#/$defs/quote"
           },
           "scope": {
             "$ref": "#/$defs/text",
@@ -136,11 +139,7 @@
             "minimum": 1
           },
           "quote": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 300,
-            "x-visible": true,
-            "description": "Verbatim excerpt of the cited source line(s); check-findings --target confirms it appears within 2 lines of `line`."
+            "$ref": "#/$defs/quote"
           },
           "note": {
             "$ref": "#/$defs/text"
@@ -243,12 +242,21 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "proof",
             "attacker",
             "payloads",
             "steps",
             "observed_result"
           ],
+          "description": "proof=local: the bounded reproduction ran in the sandbox and evidence_files lists at least one promoted file. proof=static: nothing was run; the trace must quote the whole path (entrypoint first, sink last, two or more steps) and observed_result states what the quoted source proves. Both rules are checked by the validator.",
           "properties": {
+            "proof": {
+              "enum": [
+                "local",
+                "static"
+              ],
+              "description": "How the result was established: local (executed in the sandbox) or static (proved from quoted source alone)."
+            },
             "attacker": {
               "$ref": "#/$defs/text",
               "description": "Starting capability of the dummy attacker."
@@ -261,9 +269,11 @@
               "description": "Bounded reproduction through the target's native interface."
             },
             "observed_result": {
-              "$ref": "#/$defs/text"
+              "$ref": "#/$defs/text",
+              "description": "local: what the run produced. static: what the quoted source proves."
             },
             "evidence_files": {
+              "description": "Promoted evidence under agents/<id>/evidence/. Required (>= 1) when proof is local; optional when static.",
               "type": "array",
               "uniqueItems": true,
               "items": {
@@ -413,6 +423,10 @@
               "description": "What an owner should observe (config, policy, identity, route). Never live probing."
             }
           }
+        },
+        "max_impact_if_true": {
+          "$ref": "#/$defs/level",
+          "description": "Optional triage hint: the worst impact level if the lead turns out true. Not a severity; never reported as one."
         },
         "category": {
           "$ref": "#/$defs/category"

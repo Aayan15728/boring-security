@@ -23,7 +23,9 @@ From the diff and the files it touches, answer briefly:
 ## 3. Hunt
 
 Small diff (≲ 400 changed lines, ≤ 2 boundaries): hunt yourself using `core-classes.md` + selected pack blocks.
-Larger: one Hunter per boundary, briefed as in `phases/2-hunt.md` but with units = (changed surface × boundary × class). Run `scripts/detect.cjs <repo> --diff <base>` first and trace each hit. Always include one **Obvious things** pass over the diff (secrets, debug flags, TODO-auth, permissive CORS, new `eval`).
+Larger: create a scoped run (`scope.kind: "diff"`, `references/audit-run.md`) in `~/boring-security-runs/<repo>/review-<head-sha7>/`, seed units = (changed surface × boundary × class) with `run-state.cjs add-units`, and brief one Hunter per boundary with `run-state.cjs brief` as in `phases/2-hunt.md`.
+
+Either way, run `scripts/detect.cjs <repo> --diff <base>` first and trace each hit. It reads suppression config from the base, so a change cannot silence itself; a `meta.suppression-config-changed` lead means the diff edits suppressions, and that edit is itself in review. Always include one **Obvious things** pass over the diff (secrets, debug flags, TODO-auth, permissive CORS, new `eval`).
 
 Read beyond the diff wherever the invariant depends on unchanged code (callers, middleware, siblings). A diff that's safe in isolation can break an assumption elsewhere — that's in scope.
 
@@ -36,7 +38,7 @@ Diff-specific questions:
 
 ## 4. Validate
 
-Each candidate goes to a fresh Skeptic with the `phases/3-skeptic.md` brief (a single Skeptic is enough here; no separate Phase 5). Small reviews may use one Skeptic for all candidates **only if** none of them were found by that Skeptic.
+Each candidate goes to a fresh Skeptic (a single Skeptic is enough here; no separate Phase 5). With a run directory, use `run-state.cjs brief --role skeptic` and `decide` (`phases/3-skeptic.md`); without one, brief it as in `phases/3-skeptic.md` §Outside a run directory. Small reviews may use one Skeptic for all candidates **only if** none of them were found by that Skeptic.
 
 ## 5. Output
 

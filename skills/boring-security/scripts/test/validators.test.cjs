@@ -7,9 +7,9 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { Reporter, lintSchema, loadJson } = require('../lib.cjs');
-const { validateFindings, crossCheckLedger } = require('../check-findings.cjs');
-const { validateLedger, checkRun, deriveId } = require('../check-ledger.cjs');
+const { Reporter, lintSchema, loadJson, validateSchema, LEDGER_LIMITS, quoteMatches, sha256, canonicalJson, areaOf } = require('../lib.cjs');
+const { validateFindings, crossCheckLedger, verifyQuotes } = require('../check-findings.cjs');
+const { validateLedger, checkRun, deriveId, verifyUnitAgainstTarget } = require('../check-ledger.cjs');
 const { toSarif } = require('../to-sarif.cjs');
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -35,7 +35,7 @@ const confirmed = {
   intended_behavior: 'Users read only their own orders.',
   trace, evidence,
   conditions: [{ kind: 'authentication', note: 'any logged-in user' }],
-  execution: { attacker: 'dummy user A', payloads: ['GET /orders/2 as A'], steps: 'framework test client, two dummy tenants', observed_result: 'order 2 of tenant B returned' },
+  execution: { proof: 'static', attacker: 'dummy user A', payloads: ['GET /orders/2 as A'], steps: 'framework test client, two dummy tenants', observed_result: 'order 2 of tenant B returned' },
   remediation: { strategy: 'filter by caller tenant in getOrder', code_changes: [{ file: 'src/services/orders.ts', change: 'add where tenant_id = ctx.tenant' }], regression_test: 'A cannot read B order' },
   severity: { likelihood: { level: 'high', why: 'trivial' }, impact: { level: 'high', why: 'cross-tenant read' }, overall: 'high' },
   confidence: { level: 'high', why: 'reproduced locally' },
@@ -74,7 +74,8 @@ function unit(over = {}) {
   const { refs: _r, labels: _l, ...rest } = over;
   return Object.assign(u, rest);
 }
-const srcCheck = { by: 'hunter-1', paths: ['src/services/orders.ts'], invariant: 'tenant scope', method: 'source', result: 'missing', evidence: null };
+const ANCHOR = { file: 'src/services/orders.ts', line: 2, quote: 'where: { id, tenantId: ctx.tenant }' };
+const srcCheck = { by: 'hunter-1', paths: ['src/services/orders.ts'], invariant: 'tenant scope', method: 'source', result: 'missing', evidence: null, anchors: [ANCHOR] };
 
 // ---------- findings ----------
 test('valid findings pass', () => assert.deepStrictEqual(runF(findings), []));
@@ -315,3 +316,178 @@ test('identity spec sections are valid blocks and need no Discipline/Moves/Gate'
   assert.deepStrictEqual(runL([u]), []);
 });
 test('unknown verdict is named in the error', () => assert.match(runF([{ verdict: 'maybe' }]).join(NL), /verdict "maybe" is not one of/));
+
+// ---------- (a) prototype-named keys never pass as known properties ----------
+const PROTO_KEYS = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'];
+test('findings: prototype-named extra keys are unexpected properties', () => {
+  for (const k of PROTO_KEYS) {
+    const top = JSON.parse(JSON.stringify(confirmed).replace(/^\{/, `{"${k}":1,`));
+    assert.ok(Object.prototype.hasOwnProperty.call(top, k), k);
+    assert.match(runF([top]).join(NL), new RegExp(`unexpected property "${k}"`), `top-level ${k}`);
+    const nested = JSON.parse(JSON.stringify(confirmed).replace('"execution":{', `"execution":{"${k}":1,`));
+    assert.match(runF([nested]).join(NL), new RegExp(`unexpected property "${k}"`), `nested ${k}`);
+  }
+});
+test('schema engine: required and $ref use own properties only', () => {
+  assert.match(validateSchema({}, { type: 'object', required: ['toString'] }, {}).join(), /missing required property "toString"/);
+  assert.throws(() => validateSchema(1, { $ref: '#/$defs/constructor' }, { $defs: {} }), /unresolvable/);
+});
+test('ledger: prototype-named keys rejected on units, checks, anchors and refs', () => {
+  for (const k of PROTO_KEYS) {
+    const u = JSON.parse(JSON.stringify(unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [srcCheck] }))
+      .replace(/^\{/, `{"${k}":1,`).replace('"by":"hunter-1"', `"${k}":1,"by":"hunter-1"`).replace('"line":2', `"${k}":1,"line":2`));
+    const e = runL([u]).join(NL);
+    assert.ok((e.match(new RegExp(`unexpected property "${k}"`, 'g')) || []).length >= 3, `${k}: ${e}`);
+  }
+  const r = new Reporter(); checkRun(JSON.parse('{"__proto__":{"run_id":1}}'), r);
+  assert.match(r.errors.join(), /missing "run_id"/);
+});
+
+// ---------- (b) quote rule ----------
+const SRC = ['export async function getOrder(ctx, id) {', '  return db.order.findFirst({ where: { id, tenantId: ctx.tenant } });', '}', '', 'x = 1;', ')'];
+test('quoteMatches: trivial fragments fail, long quotes and whole short lines pass', () => {
+  for (const q of [')', ';', 'e', 'id', '}']) assert.strictEqual(quoteMatches(SRC, 2, q).ok, false, q);
+  assert.strictEqual(quoteMatches(SRC, 6, ')').ok, false, 'whole line without a letter or digit');
+  assert.strictEqual(quoteMatches(SRC, 2, 'where:   { id,\ttenantId: ctx.tenant }').ok, true);
+  assert.strictEqual(quoteMatches(SRC, 4, 'x = 1;').ok, true, 'whole short line within the window');
+  assert.strictEqual(quoteMatches(SRC, 1, 'x = 1;').ok, false, 'outside the +-2 window');
+  assert.strictEqual(quoteMatches(SRC, 2, 'x = 1').ok, false, 'short and not the whole line');
+  assert.match(quoteMatches(SRC, 2, 'not in this file at all').why, /not found/);
+  assert.match(quoteMatches(SRC, 99, 'x = 1;').why, /past the end/);
+});
+function makeTarget() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsec-tgt-'));
+  for (const d of ['src/services', 'src/routes', 'src/db']) fs.mkdirSync(path.join(dir, ...d.split('/')), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'services', 'orders.ts'), SRC.join('\n'));
+  fs.writeFileSync(path.join(dir, 'src', 'routes', 'orders.ts'), "router.get('/orders/:id', requireUser, getOrderHandler);\n");
+  return dir;
+}
+test('verifyQuotes rejects a trivially satisfiable quote', () => {
+  const dir = makeTarget();
+  const ev = (quote) => [{ ...rejected, trace: [{ ...trace[2], file: 'src/services/orders.ts', line: 2, quote }], evidence: [{ file: 'src/services/orders.ts', line: 2, quote, note: 'n' }] }];
+  const ok = new Reporter(); verifyQuotes(ev('findFirst({ where: { id'), dir, ok); assert.deepStrictEqual(ok.errors, []);
+  const bad = new Reporter(); verifyQuotes(ev(')'), dir, bad); assert.strictEqual(bad.errors.length, 2); assert.match(bad.errors[0], /shorter than 10/);
+  const w = new Reporter(); validateFindings(ev(')'), w); assert.match(w.warnings.join(NL), /shorter than 10/);
+});
+
+// ---------- (c) ledger size limits ----------
+test('a valid 10,000-unit ledger loads with LEDGER_LIMITS and validates quickly', () => {
+  const units = [];
+  for (let i = 0; i < 10000; i++) {
+    const n = String(i).padStart(5, '0');
+    const check = { ...srcCheck, invariant: `orders route ${n} reads only the caller tenant's rows`, result: `scoped by tenantId in getOrder; route ${n} has no alternative path`, anchors: [ANCHOR] };
+    units.push(unit({
+      refs: { surface: `src/routes/r${n}.ts#GET /r${n}/:id` }, labels: { surface: `Route ${n}` },
+      start_paths: [`src/routes/r${n}.ts`], status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [check], notes: { priority: 'normal' },
+    }));
+  }
+  units.sort((a, b) => (a.id < b.id ? -1 : 1));
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bsec-big-')), 'ledger.json');
+  fs.writeFileSync(f, JSON.stringify(units, null, 2));
+  assert.ok(fs.statSync(f).size > 5 * 1024 * 1024, 'fixture must exceed the default 5 MB cap');
+  const small = new Reporter(); assert.strictEqual(loadJson(f, small), undefined); assert.match(small.errors.join(), /larger than/);
+  const t0 = Date.now();
+  const r = new Reporter(); const data = loadJson(f, r, LEDGER_LIMITS);
+  assert.deepStrictEqual(r.errors, []);
+  validateLedger(data, r, OPTS);
+  assert.deepStrictEqual(r.errors, []);
+  assert.ok(Date.now() - t0 < 8000, `took ${Date.now() - t0} ms`);
+  const over = new Reporter(); validateLedger(new Array(10001).fill(units[0]), over, OPTS); assert.match(over.errors.join(), /more than 10000 units/);
+});
+test('loadJson honours per-call maxNodes', () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bsec-n-')), 'a.json');
+  fs.writeFileSync(f, JSON.stringify(new Array(50).fill(0)));
+  const r = new Reporter(); assert.strictEqual(loadJson(f, r, { maxNodes: 10 }), undefined); assert.match(r.errors.join(), /more than 10 JSON values/);
+  assert.strictEqual(loadJson(f, new Reporter()).length, 50);
+});
+
+// ---------- (d) execution.proof ----------
+test('confirmed needs execution.proof local|static', () => {
+  const c = clone(confirmed); delete c.execution.proof;
+  assert.match(runF([c]).join(NL), /missing required property "proof"/);
+  c.execution.proof = 'vibes'; assert.match(runF([c]).join(NL), /proof: must be one of local\|static/);
+});
+test('proof local needs evidence files', () => {
+  const c = clone(confirmed); c.execution.proof = 'local';
+  assert.match(runF([c]).join(NL), /needs at least one execution.evidence_files/);
+  c.execution.evidence_files = []; assert.match(runF([c]).join(NL), /needs at least one execution.evidence_files/);
+  c.execution.evidence_files = ['agents/hunter-1/evidence/run.txt']; assert.deepStrictEqual(runF([c]), []);
+});
+test('proof static needs the whole path from entrypoint to sink', () => {
+  const c = clone(confirmed); c.trace = [trace[2]];
+  assert.match(runF([c]).join(NL), /proof "static" needs the whole path/);
+  c.trace = [trace[0], trace[2]]; assert.deepStrictEqual(runF([c]), []);
+});
+
+// ---------- (e) max_impact_if_true ----------
+test('needs_validation may carry max_impact_if_true (a level, not a severity)', () => {
+  const n = clone(nv); n.max_impact_if_true = 'high'; assert.deepStrictEqual(runF([n]), []);
+  n.max_impact_if_true = 'severe'; assert.match(runF([n]).join(NL), /max_impact_if_true: must be one of/);
+  const c = clone(confirmed); c.max_impact_if_true = 'high'; assert.match(runF([c]).join(NL), /unexpected property "max_impact_if_true"/);
+});
+
+// ---------- (g) anchors ----------
+test('covered unit needs an anchored check; archived covered states do not', () => {
+  const { anchors: _a, ...plain } = srcCheck;
+  assert.match(runL([unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [plain] })]).join(NL), /anchors/);
+  assert.match(runL([unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [{ ...plain, anchors: [] }] })]).join(NL), /non-empty anchors/);
+  assert.deepStrictEqual(runL([unit({ status: 'blocked', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [plain], open: ['needs build'] })]), []);
+  const archived = { wave: 1, status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [plain], fingerprints: [], open: [], reopen_reason: 'r' };
+  assert.deepStrictEqual(runL([unit({ wave: 2, status: 'in_progress', owner: 'hunter-2', history: [archived] })]), []);
+});
+test('anchor shape is validated', () => {
+  const bad = [{ file: '../x.ts', line: 0, quote: '\u200b' }, { file: 'a.ts', line: 1.5, quote: 'x'.repeat(301) }, 'nope', { file: 'a.ts', line: 1 }];
+  const e = runL([unit({ status: 'candidate', owner: 'hunter-1', paths: ['src/services/orders.ts'], fingerprints: ['idor:x'], checks: [{ ...srcCheck, anchors: bad }] })]).join(NL);
+  for (const re of [/repo-relative/, /line must be an integer >= 1/, /visible text/, /longer than 300/, /must be an object/, /missing required property "quote"/]) assert.match(e, re);
+  assert.match(runL([unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [{ ...srcCheck, anchors: [ANCHOR, ANCHOR] }] })]).join(NL), /duplicate anchors/);
+});
+test('--target verifies anchor quotes and that paths exist inside the target', (t) => {
+  const dir = makeTarget();
+  const good = unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [srcCheck] });
+  assert.deepStrictEqual(runL([good], { ...OPTS, target: dir }), []);
+  const r0 = new Reporter(); assert.strictEqual(verifyUnitAgainstTarget(good, dir, r0), 0);
+  const dirPath = unit({ start_paths: ['src/db'] }); assert.deepStrictEqual(runL([dirPath], { ...OPTS, target: dir }), []);
+  const wrong = unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [{ ...srcCheck, anchors: [{ ...ANCHOR, quote: 'requireTenant(ctx)' }] }] });
+  assert.match(runL([wrong], { ...OPTS, target: dir }).join(NL), /anchor quote not found/);
+  const short = unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [{ ...srcCheck, anchors: [{ ...ANCHOR, quote: ')' }] }] });
+  assert.match(runL([short], { ...OPTS, target: dir }).join(NL), /shorter than 10/);
+  const missing = unit({ start_paths: ['src/nope.ts'], status: 'covered', owner: 'hunter-1', paths: ['src/gone.ts'], checks: [{ ...srcCheck, paths: ['src/gone.ts'] }] });
+  const r = new Reporter(); const n = verifyUnitAgainstTarget(missing, dir, r);
+  assert.strictEqual(n, 3, r.errors.join(NL)); assert.match(r.errors.join(NL), /start_path "src\/nope.ts" does not exist/);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'bsec-out-'));
+  fs.writeFileSync(path.join(outside, 'secret.ts'), SRC.join('\n'));
+  try { fs.symlinkSync(path.join(outside, 'secret.ts'), path.join(dir, 'src', 'link.ts')); } catch { t.skip('symlinks not permitted here'); return; }
+  const viaLink = unit({ status: 'covered', owner: 'hunter-1', paths: ['src/link.ts'], checks: [{ ...srcCheck, paths: ['src/link.ts'], anchors: [{ ...ANCHOR, file: 'src/link.ts' }] }] });
+  const e = runL([viaLink], { ...OPTS, target: dir }).join(NL);
+  assert.match(e, /path "src\/link.ts" does not exist/); assert.match(e, /not found as a readable regular file/);
+});
+test('check-ledger CLI accepts --target', () => {
+  const dir = makeTarget();
+  const l = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bsec-cl-')), 'ledger.json');
+  const S = path.resolve(__dirname, '..', 'check-ledger.cjs');
+  fs.writeFileSync(l, JSON.stringify([unit({ status: 'covered', owner: 'hunter-1', paths: ['src/services/orders.ts'], checks: [srcCheck] })]));
+  execFileSync(process.execPath, [S, l, '--target', dir], { stdio: 'pipe' });
+  fs.writeFileSync(l, JSON.stringify([unit({ start_paths: ['src/missing.ts'] })]));
+  assert.throws(() => execFileSync(process.execPath, [S, l, '--target', dir], { stdio: 'pipe' }));
+  execFileSync(process.execPath, [S, l], { stdio: 'pipe' });
+  assert.match(execFileSync(process.execPath, [S, '--help'], { stdio: 'pipe' }).toString(), /--target <repo>/);
+});
+
+// ---------- (i) run.json optional enums ----------
+test('run.json trust and advisories are optional enums', () => {
+  const base = { run_id: 'r', repo: 'x', target: '/t', source_ref: {}, profile: 'standard', scope: { kind: 'full' }, execution: 'source-only', status: 'in_progress', incomplete_reason: null };
+  const ok = new Reporter(); checkRun({ ...base, trust: 'untrusted', advisories: 'not_checked' }, ok); assert.deepStrictEqual(ok.errors, []);
+  const ok2 = new Reporter(); checkRun({ ...base, trust: 'own', advisories: 'checked' }, ok2); assert.deepStrictEqual(ok2.errors, []);
+  const bad = new Reporter(); checkRun({ ...base, trust: 'mine', advisories: null }, bad);
+  assert.match(bad.errors.join(NL), /trust must be one of own\|untrusted/); assert.match(bad.errors.join(NL), /advisories must be one of checked\|not_checked/);
+});
+
+// ---------- (j, k) lib helpers ----------
+test('app-stack pack area, sha256 and canonicalJson', () => {
+  assert.strictEqual(areaOf('packs/app-stack.md#Row level security'), 'App stack (BaaS & serverless)');
+  assert.strictEqual(areaOf('packs/constructor.md#X'), 'Basics & other');
+  assert.strictEqual(sha256('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.strictEqual(canonicalJson({ b: 1, a: [{ d: 2, c: null }, 'x'], u: undefined }), '{"a":[{"c":null,"d":2},"x"],"b":1}');
+  assert.strictEqual(canonicalJson({ a: 1, b: 2 }), canonicalJson({ b: 2, a: 1 }));
+  assert.throws(() => canonicalJson({ x: NaN }));
+});

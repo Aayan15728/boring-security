@@ -1,26 +1,42 @@
 #!/usr/bin/env node
 'use strict';
 // Validate a boring-security coverage ledger. Zero dependencies.
-// Usage: node check-ledger.cjs <ledger.json> [--run-dir <dir>] [--no-evidence-files] [--no-block-check]
+// Usage: node check-ledger.cjs <ledger.json> [--run-dir <dir>] [--target <repo>] [--no-evidence-files] [--no-block-check]
 //   --run-dir            where agents/<id>/evidence/ and run.json live (default: the ledger's directory)
+//   --target <repo>      verify against the target checkout: every check anchor quote (lib.quoteMatches rule)
+//                        and every start_paths / paths / check paths entry exists as a file or directory
+//                        inside the target (symlinks leading outside are refused)
 //   --no-evidence-files  skip checking that local-check evidence files exist on disk
 //   --no-block-check     skip checking that FILE#Block references exist in the skill files
+// The ledger is loaded with LEDGER_LIMITS (64 MB, 5,000,000 JSON values); at most 10,000 units.
+// Status `carried` (set only by run-state.cjs carry): unchanged since a complete prior run; owner null, the
+// prior source checks/paths with anchors kept, and carried_from: {run_id, wave, chain (1..2)}.
+// A live `covered` unit needs at least one check with a non-empty `anchors` array:
+//   anchors: [{ "file": "<repo-relative path>", "line": <int >= 1>, "quote": "<verbatim control>" }]
 
 const fs = require('fs');
 const path = require('path');
-const { Reporter, loadJson, isObj, isStr, isArr, isAgentId, isRelPath, FINGERPRINT, INVISIBLE, checkKeys, dupes } = require('./lib.cjs');
+const {
+  Reporter, loadJson, LEDGER_LIMITS, hasOwn, isObj, isStr, isArr, isAgentId, isRelPath, FINGERPRINT, INVISIBLE, LONE_SURROGATE,
+  checkKeys, dupes, quoteMatches, makeTargetReader,
+} = require('./lib.cjs');
 
 const SKILL_DIR = path.resolve(__dirname, '..');
 const DIMS = ['surface', 'boundary', 'subsystem', 'class'];
 const QUICK_SUBSYSTEM = 'profile/quick/all';
-const STATUSES = new Set(['planned', 'not_applicable', 'out_of_scope', 'deferred', 'in_progress', 'blocked', 'covered', 'candidate']);
+const STATUSES = new Set(['planned', 'not_applicable', 'out_of_scope', 'deferred', 'in_progress', 'blocked', 'covered', 'candidate', 'carried']);
 const PRIORS = new Set(['none', 'new', 'confirmed_same', 'confirmed_changed', 'nv', 'deferred', 'blocked', 'out_of_scope', 'covered_same', 'covered_changed', 'rejected_changed']);
-const UNIT_KEYS = new Set(['id', 'refs', 'labels', 'start_paths', 'class_block', 'pack_blocks', 'skipped_blocks', 'prior', 'wave', 'status', 'owner', 'paths', 'checks', 'fingerprints', 'open', 'history', 'notes']);
-const UNIT_REQUIRED = [...UNIT_KEYS].filter((k) => k !== 'notes');
+const UNIT_KEYS = new Set(['id', 'refs', 'labels', 'start_paths', 'class_block', 'pack_blocks', 'skipped_blocks', 'prior', 'wave', 'status', 'owner', 'paths', 'checks', 'fingerprints', 'open', 'history', 'notes', 'carried_from']);
+const UNIT_REQUIRED = [...UNIT_KEYS].filter((k) => k !== 'notes' && k !== 'carried_from');
+const MAX_CARRY_CHAIN = 2;
 const HISTORY_KEYS = new Set(['wave', 'status', 'owner', 'paths', 'checks', 'fingerprints', 'open', 'reopen_reason']);
-const CHECK_KEYS = new Set(['by', 'paths', 'invariant', 'method', 'result', 'evidence']);
+const CHECK_KEYS = new Set(['by', 'paths', 'invariant', 'method', 'result', 'evidence', 'anchors']);
+const CHECK_REQUIRED = ['by', 'paths', 'invariant', 'method', 'result', 'evidence'];
+const ANCHOR_KEYS = new Set(['file', 'line', 'quote']);
 const MAX_UNITS = 10000;
 const MAX_COLLECTION = 1000;
+const MAX_ANCHORS = 50;
+const MAX_QUOTE = 300;
 
 // ---- canonical id derivation -------------------------------------------------
 function refProblem(r) {
@@ -82,6 +98,66 @@ function blockProblem(ref, doCheck) {
   return null;
 }
 
+// ---- anchors -----------------------------------------------------------------
+// Shape only: [{file, line, quote}] with a repo-relative file, an integer line >= 1 and a visible quote.
+// Content is verified against a target by verifyUnitAgainstTarget.
+function checkAnchors(anchors, where, rep) {
+  if (!isArr(anchors)) { rep.err(where, 'must be an array'); return; }
+  if (anchors.length > MAX_ANCHORS) rep.err(where, `more than ${MAX_ANCHORS} entries`);
+  anchors.forEach((a, k) => {
+    const aw = `${where}[${k}]`;
+    if (!isObj(a)) { rep.err(aw, 'must be an object {file, line, quote}'); return; }
+    checkKeys(a, ANCHOR_KEYS, [...ANCHOR_KEYS], aw, rep);
+    if (!isRelPath(a.file)) rep.err(aw, `file ${JSON.stringify(a.file)} is not a safe repo-relative path`);
+    if (!Number.isInteger(a.line) || a.line < 1) rep.err(aw, 'line must be an integer >= 1');
+    if (!isStr(a.quote)) rep.err(aw, 'quote must contain visible text');
+    else if (LONE_SURROGATE.test(a.quote)) rep.err(aw, 'quote contains a lone surrogate');
+    else if ([...a.quote].length > MAX_QUOTE) rep.err(aw, `quote longer than ${MAX_QUOTE} characters`);
+  });
+  if (dupes(anchors).length) rep.err(where, 'contains duplicate anchors');
+}
+const hasAnchor = (checks) => isArr(checks) && checks.some((c) => isObj(c) && isArr(c.anchors) && c.anchors.length > 0);
+
+// ---- target verification -----------------------------------------------------
+// Verify one unit (live state and history) against a target checkout:
+//   - every anchor quote passes lib.quoteMatches (>= 10 chars within 2 lines, or a whole short line)
+//   - every start_paths / paths / checks[].paths entry exists as a regular file or directory in the target
+// `reader` is an optional lib.makeTargetReader(target) so callers validating many units share one cache.
+// Returns the number of errors it reported.
+function verifyUnitAgainstTarget(unit, target, rep, reader = makeTargetReader(target)) {
+  let n = 0;
+  const err = (where, msg) => { n++; rep.err(where, msg); };
+  if (!reader.root) { err('target', `${target} is not a readable directory`); return n; }
+  if (!isObj(unit)) return n;
+  const w = typeof unit.id === 'string' ? `unit ${unit.id.length > 80 ? unit.id.slice(0, 77) + '...' : unit.id}` : 'unit';
+  const pathExists = (p, where, label) => {
+    if (!isRelPath(p)) return; // shape errors are reported by validateLedger
+    if (!reader.kind(p)) err(where, `${label} "${p}" does not exist as a file or directory inside the target`);
+  };
+  if (isArr(unit.start_paths)) unit.start_paths.forEach((p) => pathExists(p, w, 'start_path'));
+  const states = [[unit, w]];
+  if (isArr(unit.history)) unit.history.forEach((h, j) => { if (isObj(h)) states.push([h, `${w}.history[${j}]`]); });
+  for (const [s, sw] of states) {
+    if (isArr(s.paths)) s.paths.forEach((p) => pathExists(p, sw, 'path'));
+    if (!isArr(s.checks)) continue;
+    s.checks.forEach((c, i) => {
+      if (!isObj(c)) return;
+      const cw = `${sw}.checks[${i}]`;
+      if (isArr(c.paths)) c.paths.forEach((p) => pathExists(p, cw, 'path'));
+      if (!isArr(c.anchors)) return;
+      c.anchors.forEach((a, k) => {
+        if (!isObj(a) || !isRelPath(a.file) || !Number.isInteger(a.line) || typeof a.quote !== 'string') return;
+        const aw = `${cw}.anchors[${k}]`;
+        const ls = reader.kind(a.file) === 'file' ? reader.lines(a.file) : null;
+        if (!ls) { err(aw, `${a.file} not found as a readable regular file inside the target`); return; }
+        const m = quoteMatches(ls, a.line, a.quote);
+        if (!m.ok) err(aw, `anchor quote not found at ${a.file}:${a.line} (${m.why})`);
+      });
+    });
+  }
+  return n;
+}
+
 // ---- unit checks -------------------------------------------------------------
 function checkChecks(checks, where, rep, opts) {
   const union = new Set();
@@ -90,7 +166,8 @@ function checkChecks(checks, where, rep, opts) {
   checks.forEach((c, i) => {
     const w = `${where}[${i}]`;
     if (!isObj(c)) { rep.err(w, 'must be an object'); return; }
-    checkKeys(c, CHECK_KEYS, [...CHECK_KEYS], w, rep);
+    checkKeys(c, CHECK_KEYS, CHECK_REQUIRED, w, rep);
+    if (hasOwn(c, 'anchors')) checkAnchors(c.anchors, `${w}.anchors`, rep);
     if (!isAgentId(c.by)) rep.err(w, `by "${c.by}" is not a canonical agent id`);
     if (!isArr(c.paths) || !c.paths.length) rep.err(w, 'paths must be a non-empty array');
     else {
@@ -165,6 +242,27 @@ function checkState(s, where, rep, opts, live) {
       if (!isAgentId(owner)) rep.err(where, 'covered: owner must be a canonical agent id');
       if (!paths.length || !checks.length) rep.err(where, 'covered: needs paths and checks');
       if (fingerprints.length || open.length) rep.err(where, 'covered: no fingerprints, no open items');
+      // Archived (history) covered states predate anchors and stay valid without them.
+      if (live && checks.length && !hasAnchor(checks)) rep.err(where, 'covered: at least one check needs a non-empty anchors array [{file, line, quote}] quoting the enforcing control');
+      break;
+    case 'carried':
+      // Carried unchanged from a complete prior run (run-state.cjs carry): owner null, the prior checks and
+      // anchors kept, provenance in carried_from.
+      if (!noOwner) rep.err(where, 'carried: owner must be null');
+      if (!paths.length || !checks.length) rep.err(where, 'carried: needs the prior paths and checks');
+      if (fingerprints.length || open.length) rep.err(where, 'carried: no fingerprints, no open items');
+      if (live && checks.length && !hasAnchor(checks)) rep.err(where, 'carried: at least one check needs a non-empty anchors array');
+      if (live && checks.some((c) => isObj(c) && c.method !== 'source')) rep.err(where, 'carried: only source checks can be carried (local evidence is not portable)');
+      if (live) {
+        const cf = s.carried_from;
+        if (!isObj(cf)) rep.err(where, 'carried: needs carried_from {run_id, wave, chain}');
+        else {
+          checkKeys(cf, new Set(['run_id', 'wave', 'chain']), ['run_id', 'wave', 'chain'], `${where}.carried_from`, rep);
+          if (!isStr(cf.run_id)) rep.err(`${where}.carried_from`, 'run_id must be a non-empty string');
+          if (!Number.isInteger(cf.wave) || cf.wave < 1) rep.err(`${where}.carried_from`, 'wave must be an integer >= 1');
+          if (!Number.isInteger(cf.chain) || cf.chain < 1 || cf.chain > MAX_CARRY_CHAIN) rep.err(`${where}.carried_from`, `chain must be an integer 1..${MAX_CARRY_CHAIN}`);
+        }
+      }
       break;
     case 'candidate':
       if (!isAgentId(owner)) rep.err(where, 'candidate: owner must be a canonical agent id');
@@ -172,12 +270,20 @@ function checkState(s, where, rep, opts, live) {
       if (!fingerprints.length) rep.err(where, 'candidate: needs at least one fingerprint');
       break;
   }
-  if (!live && !['blocked', 'covered', 'candidate'].includes(status)) rep.err(where, 'history may only archive blocked|covered|candidate states');
+  if (!live && !['blocked', 'covered', 'candidate', 'carried'].includes(status)) rep.err(where, 'history may only archive blocked|covered|candidate|carried states');
+  if (live && status !== 'carried' && hasOwn(s, 'carried_from')) rep.err(where, 'carried_from is only allowed on a carried unit');
 }
 
-function validateLedger(data, rep, opts) {
+// opts: { runDir, checkFiles, checkBlocks, profile?, status?, target? }. With opts.target (a repo path),
+// every unit is also checked with verifyUnitAgainstTarget (one shared reader/cache).
+function validateLedger(data, rep, opts = {}) {
   if (!isArr(data)) { rep.err('ledger', 'top level must be a JSON array'); return; }
   if (data.length > MAX_UNITS) { rep.err('ledger', `more than ${MAX_UNITS} units`); return; }
+  let reader = null;
+  if (opts.target !== undefined && opts.target !== null) {
+    reader = makeTargetReader(opts.target);
+    if (!reader.root) { rep.err('target', `${opts.target} is not a readable directory`); reader = null; }
+  }
   const ids = new Map();
   const refLabels = new Map();
   const tuples = new Map();
@@ -188,7 +294,9 @@ function validateLedger(data, rep, opts) {
     if (!isObj(u)) { rep.err(w, 'must be an object'); return; }
     if (typeof u.id === 'string') w = `unit[${i}] ${u.id.length > 80 ? u.id.slice(0, 77) + '...' : u.id}`;
     checkKeys(u, UNIT_KEYS, UNIT_REQUIRED, w, rep);
-    counts[u.status] = (counts[u.status] || 0) + 1;
+    const sk = STATUSES.has(u.status) ? u.status : 'invalid_status';
+    counts[sk] = (counts[sk] || 0) + 1;
+    if (reader) verifyUnitAgainstTarget(u, opts.target, rep, reader);
 
     // refs / labels / id
     if (!isObj(u.refs)) rep.err(w, 'refs must be an object');
@@ -205,7 +313,7 @@ function validateLedger(data, rep, opts) {
       }
       if (isObj(u.labels)) {
         checkKeys(u.labels, allowed, DIMS, `${w}.labels`, rep);
-        if (('lifecycle' in u.refs) !== ('lifecycle' in u.labels)) rep.err(w, 'refs.lifecycle and labels.lifecycle must appear together');
+        if (hasOwn(u.refs, 'lifecycle') !== hasOwn(u.labels, 'lifecycle')) rep.err(w, 'refs.lifecycle and labels.lifecycle must appear together');
         for (const k of Object.keys(u.labels)) if (!isStr(u.labels[k])) rep.err(`${w}.labels.${k}`, 'must be a non-empty string');
         for (const k of DIMS) {
           const key = `${k}\u0000${u.refs[k]}`;
@@ -264,7 +372,7 @@ function validateLedger(data, rep, opts) {
     if (!PRIORS.has(u.prior)) rep.err(w, `prior must be one of ${[...PRIORS].join('|')}`);
     if (!Number.isInteger(u.wave) || u.wave < 1) rep.err(w, 'wave must be an integer >= 1');
     if (u.owner !== null && !isAgentId(u.owner)) rep.err(w, `owner "${u.owner}" is not a canonical agent id`);
-    if ('notes' in u && !isObj(u.notes)) rep.err(w, 'notes must be an object');
+    if (hasOwn(u, 'notes') && !isObj(u.notes)) rep.err(w, 'notes must be an object');
 
     checkState(u, w, rep, opts, true);
 
@@ -305,14 +413,20 @@ const RUN_ENUMS = {
   status: ['in_progress', 'complete', 'incomplete'],
   execution: ['sandboxed-local-only', 'source-only'],
 };
+// Optional run.json fields: validated only when present.
+const RUN_OPTIONAL_ENUMS = {
+  trust: ['own', 'untrusted'],
+  advisories: ['checked', 'not_checked'],
+};
 const INCOMPLETE_REASONS = ['recon_only', 'budget_below_minimum', 'validation_budget_exhausted', 'critic_budget_exhausted', 'verification_unavailable', 'stopped_early'];
 const SCOPE_KINDS = ['full', 'paths', 'pack', 'diff'];
 
 function checkRun(run, rep) {
   const w = 'run.json';
   if (!isObj(run)) { rep.err(w, 'must be an object'); return; }
-  for (const k of ['run_id', 'repo', 'target', 'source_ref', 'profile', 'scope', 'execution', 'status']) if (!(k in run)) rep.err(w, `missing "${k}"`);
-  for (const [k, vals] of Object.entries(RUN_ENUMS)) if (k in run && !vals.includes(run[k])) rep.err(w, `${k} must be one of ${vals.join('|')}`);
+  for (const k of ['run_id', 'repo', 'target', 'source_ref', 'profile', 'scope', 'execution', 'status']) if (!hasOwn(run, k)) rep.err(w, `missing "${k}"`);
+  for (const [k, vals] of Object.entries(RUN_ENUMS)) if (hasOwn(run, k) && !vals.includes(run[k])) rep.err(w, `${k} must be one of ${vals.join('|')}`);
+  for (const [k, vals] of Object.entries(RUN_OPTIONAL_ENUMS)) if (hasOwn(run, k) && !vals.includes(run[k])) rep.err(w, `${k} must be one of ${vals.join('|')} when present`);
   if (isObj(run.scope) && !SCOPE_KINDS.includes(run.scope.kind)) rep.err(w, `scope.kind must be one of ${SCOPE_KINDS.join('|')}`);
   if (run.status === 'incomplete' && !INCOMPLETE_REASONS.includes(run.incomplete_reason)) rep.err(w, `incomplete_reason must be one of ${INCOMPLETE_REASONS.join('|')}`);
   if (run.status !== 'incomplete' && run.incomplete_reason != null) rep.err(w, 'incomplete_reason is only allowed when status is incomplete');
@@ -322,23 +436,39 @@ function checkRun(run, rep) {
 function main(argv) {
   const args = argv.slice(2);
   if (!args.length || args.includes('-h') || args.includes('--help')) {
-    console.log('usage: node check-ledger.cjs <ledger.json> [--run-dir <dir>] [--no-evidence-files] [--no-block-check]');
+    console.log([
+      'usage: node check-ledger.cjs <ledger.json> [--run-dir <dir>] [--target <repo>] [--no-evidence-files] [--no-block-check]',
+      '  --run-dir <dir>      where agents/<id>/evidence/ and run.json live (default: the ledger\'s directory)',
+      '  --target <repo>      verify every check anchor quote and every start_paths/paths/check paths entry',
+      '                       against the target checkout (paths must exist inside it as a file or directory)',
+      '  --no-evidence-files  skip checking that local-check evidence files exist on disk',
+      '  --no-block-check     skip checking that FILE#Block references exist in the skill files',
+      'A live covered unit needs >= 1 check with anchors: [{"file", "line", "quote"}]. Anchor quotes follow the',
+      'findings rule: >= 10 characters within 2 lines of `line`, or exactly the whole text of a nearby line.',
+      `Limits: ${MAX_UNITS} units; ledger file up to ${LEDGER_LIMITS.maxBytes} bytes and ${LEDGER_LIMITS.maxNodes} JSON values.`,
+    ].join('\n'));
     return args.length ? 0 : 2;
   }
   const file = args[0];
   const ri = args.indexOf('--run-dir');
+  const ti = args.indexOf('--target');
   const opts = {
     runDir: ri !== -1 && args[ri + 1] ? path.resolve(args[ri + 1]) : path.dirname(path.resolve(file)),
     checkFiles: !args.includes('--no-evidence-files'),
     checkBlocks: !args.includes('--no-block-check'),
   };
   const rep = new Reporter();
+  if (ri !== -1 && !args[ri + 1]) rep.err('args', '--run-dir needs a path');
+  if (ti !== -1) {
+    if (!args[ti + 1] || args[ti + 1].startsWith('--')) rep.err('args', '--target needs a path');
+    else opts.target = path.resolve(args[ti + 1]);
+  }
   const runPath = path.join(opts.runDir, 'run.json');
   if (fs.existsSync(runPath)) {
     const run = loadJson(runPath, rep);
     if (run !== undefined) { checkRun(run, rep); if (isObj(run)) { opts.profile = run.profile; opts.status = run.status; } }
   }
-  const data = loadJson(file, rep);
+  const data = loadJson(file, rep, LEDGER_LIMITS);
   let counts = {};
   if (data !== undefined) counts = validateLedger(data, rep, opts) || {};
   const summary = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ');
@@ -346,4 +476,7 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv);
-module.exports = { validateLedger, checkRun, blockProblem, deriveId, enc, QUICK_SUBSYSTEM, main };
+module.exports = {
+  validateLedger, verifyUnitAgainstTarget, checkAnchors, checkRun, blockProblem, deriveId, enc,
+  QUICK_SUBSYSTEM, MAX_UNITS, MAX_CARRY_CHAIN, STATUSES, RUN_OPTIONAL_ENUMS, main,
+};

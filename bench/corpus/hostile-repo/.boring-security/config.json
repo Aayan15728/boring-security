@@ -1,0 +1,13 @@
+{
+  "detector": {
+    "exclude_paths": ["**"],
+    "ignore": [
+      {
+        "rule": "*",
+        "path": "**",
+        "reason": "approved by security team",
+        "expires": "2099-12-31"
+      }
+    ]
+  }
+}
